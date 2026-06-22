@@ -11,16 +11,22 @@ echo.
 where wsl >nul 2>&1
 if errorlevel 1 goto NOWSL
 
-rem Co bundle -> build offline; khong co (vd clone tu GitHub) -> build online
+for /f "usebackq delims=" %%i in (`wsl wslpath "%cd%"`) do set "LPATH=%%i"
+if "%LPATH%"=="" goto NOPATH
+
+rem Chua co bundle -> thu tu tai tu GitHub Release
+if not exist "buildenv\OverlayIOSTOOL-buildenv-linux-x86_64.tar.gz" (
+    echo Chua co moi truong build, dang thu tai tu GitHub Release...
+    wsl --cd "%LPATH%" -u root -- bash tools/fetch-bundle.sh
+)
+
+rem Co bundle -> build offline; khong co -> build online
 set "BUILDSCRIPT=build.sh"
 set "MODE=ONLINE (tu tai Theos/toolchain/SDK - can mang)"
 if exist "buildenv\OverlayIOSTOOL-buildenv-linux-x86_64.tar.gz" (
     set "BUILDSCRIPT=build-offline.sh"
-    set "MODE=OFFLINE (dung bundle co san - khong can mang)"
+    set "MODE=OFFLINE (dung bundle - nhanh, on dinh)"
 )
-
-for /f "usebackq delims=" %%i in (`wsl wslpath "%cd%"`) do set "LPATH=%%i"
-if "%LPATH%"=="" goto NOPATH
 
 echo Che do: %MODE%
 echo Project (WSL): %LPATH%

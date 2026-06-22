@@ -35,18 +35,20 @@ Thấy `Ubuntu-22.04` là được.
 
 Chọn **một** trong hai cách:
 
-### Cách A — Tải từ GitHub (build ONLINE, cần mạng)
+### Cách A — Tải từ GitHub (khuyến nghị, cần mạng lần đầu)
 1. Vào https://github.com/kenn2305/ToolOverlayIOS
 2. Bấm **Code ▾ → Download ZIP**, giải nén ra (ví dụ) `E:\OverlayIOSTOOL`.
    (Hoặc dùng git: `git clone https://github.com/kenn2305/ToolOverlayIOS.git`)
-3. Lần build đầu sẽ **tự tải Theos + toolchain + SDK** (vài trăm MB, cần mạng).
+3. Lần đầu bấm `BUILD.cmd`, nó **tự tải bundle môi trường (~650MB) từ Releases** rồi
+   build. Các lần sau không tải lại.
 
 ### Cách B — Nhận folder kèm bundle (build OFFLINE, không cần mạng)
 1. Nhận **nguyên thư mục project** (gồm thư mục `buildenv\` ~650MB) qua USB/ổ cứng/Drive.
 2. Đặt vào ổ đĩa, ví dụ `E:\OverlayIOSTOOL`.
 3. Vì đã có sẵn môi trường trong `buildenv\`, build **không cần Internet**.
 
-> `BUILD.cmd` **tự nhận biết**: có `buildenv\` thì build offline, không có thì build online.
+> `BUILD.cmd` tự xử lý: có `buildenv\` → build offline; chưa có → tự tải từ Releases;
+> nếu không tải được (mất mạng) → tự chuyển build online.
 
 ---
 
