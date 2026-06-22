@@ -1,0 +1,24 @@
+#!/bin/bash
+export PATH="/var/jb/usr/bin:/var/jb/usr/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+
+rm -f /var/mobile/Library/OverlayIOSTOOL/overlay.png 2>/dev/null || true
+rm -f /var/mobile/Library/OverlayIOSTOOL/state.plist 2>/dev/null || true
+rm -f /var/mobile/Library/OverlayIOSTOOL/springboard-guard.plist 2>/dev/null || true
+rm -f /var/mobile/Library/OverlayIOSTOOL/disabled-after-crash 2>/dev/null || true
+
+UICACHE=""
+if [ -x /var/jb/usr/bin/uicache ]; then
+    UICACHE=/var/jb/usr/bin/uicache
+elif [ -x /usr/bin/uicache ]; then
+    UICACHE=/usr/bin/uicache
+elif command -v uicache >/dev/null 2>&1; then
+    UICACHE="$(command -v uicache)"
+fi
+
+if [ -n "$UICACHE" ]; then
+    "$UICACHE" -p /var/jb/Applications/OverlayIOSTOOLApp.app 2>/dev/null || true
+    "$UICACHE" -p /Applications/OverlayIOSTOOLApp.app 2>/dev/null || true
+    "$UICACHE" -a 2>/dev/null || true
+fi
+
+exit 0

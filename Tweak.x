@@ -1,697 +1,1681 @@
+/**
+ * OverlayIOSTOOL - SpringBoard visual host with guarded app proxies.
+ *
+ * The companion app publishes a selected image through a named pasteboard and
+ * posts a Darwin notification. SpringBoard is the only process that renders
+ * the image; user apps get a guarded transparent proxy for input forwarding.
+ * Hooks are initialized only after process validation to avoid system UIKit
+ * process crash loops on arm64e/Dopamine.
+ */
+
 #import <UIKit/UIKit.h>
-#import <PhotosUI/PhotosUI.h>
+#import <QuartzCore/QuartzCore.h>
 #import <notify.h>
+#import <sys/socket.h>
+#import <sys/stat.h>
+#import <sys/un.h>
+#import <unistd.h>
+#import <string.h>
 
-@class ImageWindow;
+static NSString * const kOverlayDirectory = @"/var/mobile/Library/OverlayIOSTOOL";
+static NSString * const kOverlayImagePath = @"/var/mobile/Library/OverlayIOSTOOL/overlay.png";
+static NSString * const kOverlaySettingsPath = @"/var/mobile/Library/OverlayIOSTOOL/settings.plist";
+static NSString * const kOverlayStatePath = @"/var/mobile/Library/OverlayIOSTOOL/state.plist";
+static NSString * const kSpringBoardGuardPath = @"/var/mobile/Library/OverlayIOSTOOL/springboard-guard.plist";
+static NSString * const kSpringBoardDisabledPath = @"/var/mobile/Library/OverlayIOSTOOL/disabled-after-crash";
+static NSString * const kOverlayPasteboardName = @"com.vietanh.overlayiostool.image";
+static const char *kOverlayUpdatedNotification = "com.vietanh.overlayiostool.image-updated";
+static const char *kOverlayRemoveNotification = "com.vietanh.overlayiostool.image-remove";
+static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.settings-updated";
+static const char *kOverlayStateNotification = "com.vietanh.overlayiostool.state-updated";
+static const char *kOverlayDepositActionNotification = "com.vietanh.overlayiostool.action.deposit";
+static const char *kOverlayWithdrawActionNotification = "com.vietanh.overlayiostool.action.withdraw";
+static const char *kOverlayRealtimeSocketPath = "/var/mobile/Library/OverlayIOSTOOL/realtime.sock";
+static const uint32_t kOverlayRealtimeMagic = 0x4F495254;
 
-// ============================================================================
-// ImageWindow — Cửa sổ đặc biệt chứa ảnh Overlay
-// Cho phép chạm xuyên qua (pass-through) các vùng không nằm trong ảnh
-// ============================================================================
-@interface ImageWindow : UIWindow
-@property (nonatomic, weak) UIImageView *targetImageView;
+static BOOL gOverlayHostReady = NO;
+static BOOL gToggleClickEnabled = NO;
+static BOOL gOverlayVisible = YES;
+static BOOL gOverlayDimmed = NO;
+static BOOL gScaleLockModeEnabled = NO;
+static BOOL gApplyingRemoteState = NO;
+static BOOL gIsSpringBoardProcess = NO;
+static BOOL gOverlayProcessEnabled = NO;
+static BOOL gObserversInstalled = NO;
+static BOOL gQuickActionsVisible = NO;
+static BOOL gScreenBlanked = NO;
+static BOOL gScreenLocked = NO;
+static BOOL gDataUnavailable = NO;
+static NSUInteger gToggleGeneration = 0;
+static NSInteger gHideDelayMs = 300;
+static NSInteger gShowDelayMs = 300;
+static NSInteger gDimAnimationMs = 0;
+static CGFloat gDimOpacity = 1.0;
+static CFTimeInterval gLastRealtimeStateSync = 0;
+static int gRealtimeClientSocket = -1;
+static CFSocketRef gRealtimeServerSocket = NULL;
+static CFRunLoopSourceRef gRealtimeServerSource = NULL;
+static UIWindow *gOverlayWindow = nil;
+static __weak UIWindow *gPreviousKeyWindow = nil;
+static UIImageView *gOverlayImageView = nil;
+static UIControl *gQuickActionsBackdrop = nil;
+static UIView *gQuickActionsPanel = nil;
+static UIButton *gQuickActionsCancelButton = nil;
+static UIView *gScaleLockControlsPanel = nil;
+static UISlider *gOverlayHideDelaySlider = nil;
+static UISlider *gOverlayShowDelaySlider = nil;
+static UISlider *gOverlayDimOpacitySlider = nil;
+static UISlider *gOverlayDimAnimationSlider = nil;
+static UILabel *gOverlayHideDelayValueLabel = nil;
+static UILabel *gOverlayShowDelayValueLabel = nil;
+static UILabel *gOverlayDimOpacityValueLabel = nil;
+static UILabel *gOverlayDimAnimationValueLabel = nil;
+static UIButton *gToggleClickButton = nil;
+static UIButton *gHideImageButton = nil;
+static UIPanGestureRecognizer *gImagePanGesture = nil;
+static UIPinchGestureRecognizer *gImagePinchGesture = nil;
+static UILongPressGestureRecognizer *gImageLongPressGesture = nil;
+static UITapGestureRecognizer *gQuickActionsTapGesture = nil;
+static UIPinchGestureRecognizer *gExpandedPinchGesture = nil;
+static UIPanGestureRecognizer *gRelativePanGesture = nil;
+static UITapGestureRecognizer *gInputBlockTapGesture = nil;
+static int gNotifyToken = 0;
+static int gRemoveToken = 0;
+static int gSettingsToken = 0;
+static int gStateToken = 0;
+static int gBlankedScreenToken = 0;
+static int gLockStateToken = 0;
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t kind;
+    double x;
+    double y;
+    double width;
+    double height;
+    double dimOpacity;
+    double dimAnimationMs;
+    uint8_t visible;
+    uint8_t dimmed;
+    uint8_t scaleLock;
+} OverlayRealtimeMessage;
+
+@interface OverlayPassthroughWindow : UIWindow
 @end
 
-@implementation ImageWindow
+static CGRect expandedScaleHitboxInRootView(void);
+static void refreshOverlayWindowVisibility(void);
+static void updateScaleLockControlsVisibility(void);
+static void updateOverlayControlValues(void);
 
-// [Fix Bug #3] Dùng hitTest thay vì pointInside+convertPoint
-// hitTest tự xử lý chính xác khi view có CGAffineTransform (scale/rotate)
+@implementation OverlayPassthroughWindow
+
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    if (self.targetImageView && self.targetImageView.superview) {
-        // Convert point sang hệ tọa độ của superview của imageView
-        CGPoint localPoint = [self.targetImageView.superview convertPoint:point fromView:self];
-        // Kiểm tra xem point có nằm trong frame đã transform của imageView không
-        if (CGRectContainsPoint(self.targetImageView.frame, localPoint)) {
-            return self.targetImageView;
+    UIView *hitView = [super hitTest:point withEvent:event];
+    UIView *rootView = self.rootViewController.view;
+
+    if (gQuickActionsVisible && rootView) {
+        return hitView ?: rootView;
+    }
+
+    if (gScaleLockModeEnabled) {
+        if (gScaleLockControlsPanel && !gScaleLockControlsPanel.hidden && [hitView isDescendantOfView:gScaleLockControlsPanel]) {
+            return hitView;
+        }
+        if (CGRectContainsPoint(self.bounds, point) && rootView) {
+            if (!hitView || hitView == self || hitView == rootView) {
+                return rootView;
+            }
+            return hitView;
+        }
+        if (!hitView || hitView == self) {
+            return rootView;
+        }
+        return hitView;
+    }
+
+    if (gOverlayImageView && gOverlayVisible && !gOverlayImageView.hidden && rootView) {
+        CGPoint rootPoint = [rootView convertPoint:point fromView:self];
+        CGPoint imagePoint = [gOverlayImageView convertPoint:rootPoint fromView:rootView];
+        if ([gOverlayImageView pointInside:imagePoint withEvent:event]) {
+            return gOverlayImageView;
         }
     }
-    return nil; // Pass through — trả nil = không xử lý event
+
+    if ((hitView == self || hitView == rootView) && event.allTouches.count >= 2 && rootView) {
+        CGPoint rootPoint = [rootView convertPoint:point fromView:self];
+        if (CGRectContainsPoint(expandedScaleHitboxInRootView(), rootPoint)) {
+            return rootView;
+        }
+    }
+
+    if (hitView == self || hitView == self.rootViewController.view) {
+        return nil;
+    }
+    return hitView;
 }
 
 @end
 
-// ============================================================================
-// OverlayWindow — Cửa sổ điều khiển (Menu) và quản lý Overlay
-// ============================================================================
-@interface OverlayWindow : UIWindow <PHPickerViewControllerDelegate, UIGestureRecognizerDelegate>
-@property (nonatomic, strong) UIButton *floatingButton;
-@property (nonatomic, strong) UIView *menuView;
-@property (nonatomic, assign) BOOL isMenuExpanded;
-
-// Cấu hình tính năng
-@property (nonatomic, assign) BOOL isToggleClickEnabled;
-@property (nonatomic, assign) NSInteger hideDelayValue; // ms
-@property (nonatomic, assign) NSInteger showDelayValue; // ms
-
-// Các thành phần của ảnh Overlay
-@property (nonatomic, strong) ImageWindow *imageWindow;
-@property (nonatomic, strong) UIImageView *imageView;
-@property (nonatomic, strong) UIImage *selectedImage;
-@property (nonatomic, assign) BOOL isImageVisible;
-@property (nonatomic, assign) BOOL targetImageVisible;
-@property (nonatomic, assign) CGRect originalFrame;
-@property (nonatomic, assign) CGPoint originalCenter; // [Fix Bug #1] assign thay vì CGPoint
-
-// UI Controls trong Menu
-@property (nonatomic, strong) UISwitch *toggleSwitch;
-@property (nonatomic, strong) UILabel *hideDelayLabel;
-@property (nonatomic, strong) UISlider *hideDelaySlider;
-@property (nonatomic, strong) UILabel *showDelayLabel;
-@property (nonatomic, strong) UISlider *showDelaySlider;
-
-- (void)displayImage:(UIImage *)image;
-- (void)handleTouchDetectedNotification;
-- (void)cleanupTool;
-- (void)resetImagePosition;
+@interface OverlayGestureHandler : NSObject <UIGestureRecognizerDelegate>
 @end
 
-@implementation OverlayWindow
+static OverlayGestureHandler *gGestureHandler = nil;
 
-- (instancetype)initWithFrame:(CGRect)frame {
-    self = [super initWithFrame:frame];
-    if (self) {
-        // Cửa sổ menu điều khiển nằm trên cùng
-        self.windowLevel = UIWindowLevelStatusBar + 100.0;
-        self.backgroundColor = [UIColor clearColor];
-        self.userInteractionEnabled = YES;
-        
-        [self loadSettings];
-        [self setupUI];
-        
-        // Đăng ký nhận sự kiện chạm toàn hệ thống thông qua Darwin Notification
-        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
-                                       (__bridge const void *)(self),
-                                       (CFNotificationCallback)touchCallback,
-                                       CFSTR("com.vietanh.overlayiostool.touch_detected"),
-                                       NULL,
-                                       CFNotificationSuspensionBehaviorDeliverImmediately);
+static UIWindow *currentKeyWindowExcludingOverlay(void) {
+    for (UIWindow *window in UIApplication.sharedApplication.windows.reverseObjectEnumerator) {
+        if (window != gOverlayWindow && window.isKeyWindow) {
+            return window;
+        }
     }
-    return self;
+    return nil;
 }
 
-- (void)dealloc {
-    CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
-                                       (__bridge const void *)(self),
-                                       CFSTR("com.vietanh.overlayiostool.touch_detected"),
-                                       NULL);
-}
+static BOOL shouldEnableOverlayInCurrentProcess(void) {
+    NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
+    NSString *bundlePath = NSBundle.mainBundle.bundlePath;
+    NSString *executablePath = NSBundle.mainBundle.executablePath;
 
-// Cử chỉ chạm xuyên qua đối với cửa sổ menu điều khiển
-- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    if (self.floatingButton && CGRectContainsPoint(self.floatingButton.frame, point)) {
+    if (!bundleIdentifier.length || !bundlePath.length) {
+        return NO;
+    }
+
+    if ([bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
         return YES;
     }
-    if (self.isMenuExpanded && self.menuView && CGRectContainsPoint(self.menuView.frame, point)) {
+
+    if ([bundleIdentifier hasPrefix:@"com.vietanh.overlayiostool"]) {
+        return NO;
+    }
+
+    if ([bundlePath containsString:@".appex"] || [executablePath containsString:@"/PlugIns/"]) {
+        return NO;
+    }
+
+    if (![bundlePath hasSuffix:@".app"]) {
+        return NO;
+    }
+
+    if ([bundlePath hasPrefix:@"/var/containers/Bundle/Application/"] ||
+        [bundlePath hasPrefix:@"/private/var/containers/Bundle/Application/"] ||
+        [bundlePath hasPrefix:@"/Applications/"] ||
+        [bundlePath hasPrefix:@"/var/jb/Applications/"] ||
+        [bundlePath hasPrefix:@"/private/var/jb/Applications/"]) {
         return YES;
     }
+
     return NO;
 }
 
-// [Fix Bug #6] Darwin notification callback — dispatch sang main thread
-static void touchCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
-    OverlayWindow *window = (__bridge OverlayWindow *)observer;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [window handleTouchDetectedNotification];
+static BOOL springBoardCrashGuardShouldDisable(void) {
+    NSFileManager *fileManager = NSFileManager.defaultManager;
+    if ([fileManager fileExistsAtPath:kSpringBoardDisabledPath]) {
+        return YES;
+    }
+
+    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+    NSDictionary *previousState = [NSDictionary dictionaryWithContentsOfFile:kSpringBoardGuardPath];
+    BOOL previousLaunchArmed = [previousState[@"armed"] boolValue];
+    NSTimeInterval previousLaunchTime = [previousState[@"timestamp"] doubleValue];
+    NSInteger failureCount = [previousState[@"failureCount"] integerValue];
+
+    if (previousLaunchArmed && previousLaunchTime > 0 && now - previousLaunchTime < 120.0) {
+        failureCount += 1;
+    } else {
+        failureCount = 1;
+    }
+
+    [fileManager createDirectoryAtPath:kOverlayDirectory
+           withIntermediateDirectories:YES
+                            attributes:nil
+                                 error:nil];
+
+    if (failureCount >= 3) {
+        [@"disabled" writeToFile:kSpringBoardDisabledPath
+                      atomically:YES
+                        encoding:NSUTF8StringEncoding
+                           error:nil];
+        NSLog(@"[OverlayIOSTOOL] Disabled after repeated SpringBoard launch failures");
+        return YES;
+    }
+
+    [@{
+        @"armed": @YES,
+        @"timestamp": @(now),
+        @"failureCount": @(failureCount)
+    } writeToFile:kSpringBoardGuardPath atomically:YES];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [@{
+            @"armed": @NO,
+            @"timestamp": @(NSDate.date.timeIntervalSince1970),
+            @"failureCount": @0
+        } writeToFile:kSpringBoardGuardPath atomically:YES];
     });
+    return NO;
 }
 
-// Tải cấu hình đã lưu
-- (void)loadSettings {
-    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Documents/overlayiostool_settings.plist"];
-    if (settings) {
-        self.isToggleClickEnabled = [settings[@"isToggleClickEnabled"] boolValue];
-        self.hideDelayValue = [settings[@"hideDelayValue"] integerValue];
-        self.showDelayValue = [settings[@"showDelayValue"] integerValue];
-    } else {
-        self.isToggleClickEnabled = NO;
-        self.hideDelayValue = 300;
-        self.showDelayValue = 300;
+static UIPasteboard *overlayPasteboard(BOOL create) {
+    return [UIPasteboard pasteboardWithName:kOverlayPasteboardName create:create];
+}
+
+static NSDictionary *overlayStateDictionary(void) {
+    NSMutableDictionary *state = [NSMutableDictionary dictionary];
+    state[@"scaleLockModeEnabled"] = @(gScaleLockModeEnabled);
+    state[@"overlayVisible"] = @(gOverlayVisible);
+    state[@"overlayDimmed"] = @(gOverlayDimmed);
+    state[@"dimOpacity"] = @(gDimOpacity);
+    state[@"dimAnimationMs"] = @(gDimAnimationMs);
+
+    if (gOverlayImageView) {
+        CGRect frame = gOverlayImageView.frame;
+        state[@"frame"] = @{
+            @"x": @(frame.origin.x),
+            @"y": @(frame.origin.y),
+            @"w": @(frame.size.width),
+            @"h": @(frame.size.height)
+        };
+    }
+
+    return state;
+}
+
+static void persistOverlayState(BOOL broadcast) {
+    if (!gOverlayImageView || gApplyingRemoteState) {
+        return;
+    }
+
+    NSDictionary *state = overlayStateDictionary();
+    [state writeToFile:kOverlayStatePath atomically:YES];
+    if (broadcast) {
+        notify_post(kOverlayStateNotification);
     }
 }
 
-// Lưu cấu hình
-- (void)saveSettings {
-    NSDictionary *settings = @{
-        @"isToggleClickEnabled": @(self.isToggleClickEnabled),
-        @"hideDelayValue": @(self.hideDelayValue),
-        @"showDelayValue": @(self.showDelayValue)
+static void applyRealtimeOverlayMessage(const OverlayRealtimeMessage *message) {
+    if (!gIsSpringBoardProcess || !message || message->magic != kOverlayRealtimeMagic || !gOverlayImageView) {
+        return;
+    }
+
+    gApplyingRemoteState = YES;
+    gOverlayImageView.frame = CGRectMake(message->x, message->y, message->width, message->height);
+    gOverlayVisible = message->visible;
+    gOverlayDimmed = message->dimmed;
+    gDimOpacity = MAX(0.0, MIN(message->dimOpacity, 1.0));
+    gDimAnimationMs = MAX(0, MIN((NSInteger)message->dimAnimationMs, 10000));
+    gScaleLockModeEnabled = message->scaleLock;
+    gOverlayImageView.hidden = !gOverlayVisible && !gScaleLockModeEnabled;
+    gOverlayImageView.alpha = gOverlayDimmed ? gDimOpacity : 1.0;
+    gOverlayImageView.layer.borderWidth = gScaleLockModeEnabled ? 3.0 : 0.0;
+    gOverlayImageView.layer.borderColor = gScaleLockModeEnabled ? UIColor.systemBlueColor.CGColor : nil;
+    updateOverlayControlValues();
+    updateScaleLockControlsVisibility();
+    refreshOverlayWindowVisibility();
+    gApplyingRemoteState = NO;
+}
+
+static void realtimeSocketCallback(CFSocketRef socket,
+                                   CFSocketCallBackType type,
+                                   CFDataRef address,
+                                   const void *data,
+                                   void *info) {
+    if (type != kCFSocketDataCallBack || !data) {
+        return;
+    }
+
+    CFDataRef packetData = (CFDataRef)data;
+    if (CFDataGetLength(packetData) < (CFIndex)sizeof(OverlayRealtimeMessage)) {
+        return;
+    }
+
+    OverlayRealtimeMessage message;
+    memcpy(&message, CFDataGetBytePtr(packetData), sizeof(message));
+    applyRealtimeOverlayMessage(&message);
+}
+
+static void __attribute__((unused)) startRealtimeServerIfNeeded(void) {
+    if (!gIsSpringBoardProcess || gRealtimeServerSocket) {
+        return;
+    }
+
+    unlink(kOverlayRealtimeSocketPath);
+
+    CFSocketContext context = {0, NULL, NULL, NULL, NULL};
+    gRealtimeServerSocket = CFSocketCreate(kCFAllocatorDefault,
+                                           PF_LOCAL,
+                                           SOCK_DGRAM,
+                                           0,
+                                           kCFSocketDataCallBack,
+                                           realtimeSocketCallback,
+                                           &context);
+    if (!gRealtimeServerSocket) {
+        NSLog(@"[OverlayIOSTOOL] Failed to create realtime socket");
+        return;
+    }
+
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    strlcpy(address.sun_path, kOverlayRealtimeSocketPath, sizeof(address.sun_path));
+
+    NSData *addressData = [NSData dataWithBytes:&address length:sizeof(address)];
+    if (CFSocketSetAddress(gRealtimeServerSocket, (__bridge CFDataRef)addressData) != kCFSocketSuccess) {
+        NSLog(@"[OverlayIOSTOOL] Failed to bind realtime socket");
+        CFRelease(gRealtimeServerSocket);
+        gRealtimeServerSocket = NULL;
+        unlink(kOverlayRealtimeSocketPath);
+        return;
+    }
+
+    chmod(kOverlayRealtimeSocketPath, 0666);
+    gRealtimeServerSource = CFSocketCreateRunLoopSource(kCFAllocatorDefault, gRealtimeServerSocket, 0);
+    CFRunLoopAddSource(CFRunLoopGetMain(), gRealtimeServerSource, kCFRunLoopCommonModes);
+    NSLog(@"[OverlayIOSTOOL] Realtime socket ready");
+}
+
+static void sendRealtimeOverlayState(void) {
+    if (gIsSpringBoardProcess || !gOverlayImageView || gApplyingRemoteState) {
+        return;
+    }
+
+    if (gRealtimeClientSocket < 0) {
+        gRealtimeClientSocket = socket(AF_UNIX, SOCK_DGRAM, 0);
+        if (gRealtimeClientSocket < 0) {
+            return;
+        }
+    }
+
+    CGRect frame = gOverlayImageView.frame;
+    OverlayRealtimeMessage message = {
+        .magic = kOverlayRealtimeMagic,
+        .version = 1,
+        .kind = 1,
+        .x = frame.origin.x,
+        .y = frame.origin.y,
+        .width = frame.size.width,
+        .height = frame.size.height,
+        .dimOpacity = gDimOpacity,
+        .dimAnimationMs = gDimAnimationMs,
+        .visible = gOverlayVisible ? 1 : 0,
+        .dimmed = gOverlayDimmed ? 1 : 0,
+        .scaleLock = gScaleLockModeEnabled ? 1 : 0
     };
-    [settings writeToFile:@"/var/mobile/Documents/overlayiostool_settings.plist" atomically:YES];
-}
 
-- (void)setupUI {
-    self.isMenuExpanded = NO;
-    self.isImageVisible = NO;
-    self.targetImageVisible = NO;
-    
-    // 1. Tạo nút nổi tròn
-    CGFloat btnSize = 60.0;
-    self.floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.floatingButton.frame = CGRectMake(20, 100, btnSize, btnSize);
-    self.floatingButton.backgroundColor = [UIColor colorWithRed:0.12 green:0.56 blue:1.0 alpha:0.9];
-    self.floatingButton.layer.cornerRadius = btnSize / 2.0;
-    self.floatingButton.layer.shadowColor = [UIColor blackColor].CGColor;
-    self.floatingButton.layer.shadowOffset = CGSizeMake(0, 4);
-    self.floatingButton.layer.shadowOpacity = 0.3;
-    self.floatingButton.layer.shadowRadius = 5.0;
-    
-    [self.floatingButton setTitle:@"⚙️" forState:UIControlStateNormal];
-    self.floatingButton.titleLabel.font = [UIFont systemFontOfSize:30];
-    
-    [self.floatingButton addTarget:self action:@selector(floatingButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-    
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePanGesture:)];
-    [self.floatingButton addGestureRecognizer:pan];
-    
-    [self addSubview:self.floatingButton];
-    
-    // 2. Tạo bảng điều khiển Menu
-    self.menuView = [[UIView alloc] initWithFrame:CGRectMake(20, 170, 280, 420)];
-    self.menuView.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.08 alpha:0.96];
-    self.menuView.layer.cornerRadius = 16.0;
-    self.menuView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.15].CGColor;
-    self.menuView.layer.borderWidth = 1.0;
-    self.menuView.layer.shadowColor = [UIColor blackColor].CGColor;
-    self.menuView.layer.shadowOffset = CGSizeMake(0, 8);
-    self.menuView.layer.shadowOpacity = 0.4;
-    self.menuView.layer.shadowRadius = 10.0;
-    self.menuView.alpha = 0.0;
-    self.menuView.hidden = YES;
-    
-    // Title
-    UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 16, 248, 24)];
-    titleLabel.text = @"iOS Overlay Image Tool";
-    titleLabel.textColor = [UIColor whiteColor];
-    titleLabel.font = [UIFont boldSystemFontOfSize:18];
-    titleLabel.textAlignment = NSTextAlignmentCenter;
-    [self.menuView addSubview:titleLabel];
-    
-    // Button Chọn Ảnh
-    UIButton *selectButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    selectButton.frame = CGRectMake(16, 54, 248, 44);
-    selectButton.backgroundColor = [UIColor colorWithRed:0.12 green:0.56 blue:1.0 alpha:0.9];
-    [selectButton setTitle:@"📷 Chọn ảnh từ Thư viện" forState:UIControlStateNormal];
-    [selectButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    selectButton.titleLabel.font = [UIFont boldSystemFontOfSize:15];
-    selectButton.layer.cornerRadius = 8.0;
-    [selectButton addTarget:self action:@selector(selectImageButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.menuView addSubview:selectButton];
-    
-    // Button Khôi phục Vị trí
-    UIButton *resetButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    resetButton.frame = CGRectMake(16, 108, 248, 44);
-    resetButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
-    [resetButton setTitle:@"🔄 Khôi phục ảnh gốc" forState:UIControlStateNormal];
-    [resetButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    resetButton.titleLabel.font = [UIFont boldSystemFontOfSize:15];
-    resetButton.layer.cornerRadius = 8.0;
-    [resetButton addTarget:self action:@selector(resetImagePosition) forControlEvents:UIControlEventTouchUpInside];
-    [self.menuView addSubview:resetButton];
-    
-    // Toggle Click Switch Label
-    UILabel *toggleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 168, 180, 30)];
-    toggleLabel.text = @"Ẩn/Hiện khi chạm màn hình";
-    toggleLabel.textColor = [UIColor whiteColor];
-    toggleLabel.font = [UIFont systemFontOfSize:14];
-    [self.menuView addSubview:toggleLabel];
-    
-    // Toggle Switch
-    self.toggleSwitch = [[UISwitch alloc] initWithFrame:CGRectMake(214, 168, 50, 30)];
-    self.toggleSwitch.onTintColor = [UIColor colorWithRed:0.12 green:0.56 blue:1.0 alpha:1.0];
-    self.toggleSwitch.on = self.isToggleClickEnabled;
-    [self.toggleSwitch addTarget:self action:@selector(toggleSwitchChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.menuView addSubview:self.toggleSwitch];
-    
-    // Trễ Ẩn (Hide Delay)
-    self.hideDelayLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 214, 248, 20)];
-    self.hideDelayLabel.text = [NSString stringWithFormat:@"Trễ ẩn: %ld ms", (long)self.hideDelayValue];
-    self.hideDelayLabel.textColor = [UIColor lightGrayColor];
-    self.hideDelayLabel.font = [UIFont systemFontOfSize:13];
-    [self.menuView addSubview:self.hideDelayLabel];
-    
-    self.hideDelaySlider = [[UISlider alloc] initWithFrame:CGRectMake(16, 238, 248, 30)];
-    self.hideDelaySlider.minimumValue = 0.0;
-    self.hideDelaySlider.maximumValue = 2000.0;
-    self.hideDelaySlider.value = self.hideDelayValue;
-    [self.hideDelaySlider addTarget:self action:@selector(hideDelaySliderChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.menuView addSubview:self.hideDelaySlider];
-    
-    // Trễ Hiện (Show Delay)
-    self.showDelayLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 278, 248, 20)];
-    self.showDelayLabel.text = [NSString stringWithFormat:@"Trễ hiện: %ld ms", (long)self.showDelayValue];
-    self.showDelayLabel.textColor = [UIColor lightGrayColor];
-    self.showDelayLabel.font = [UIFont systemFontOfSize:13];
-    [self.menuView addSubview:self.showDelayLabel];
-    
-    self.showDelaySlider = [[UISlider alloc] initWithFrame:CGRectMake(16, 302, 248, 30)];
-    self.showDelaySlider.minimumValue = 0.0;
-    self.showDelaySlider.maximumValue = 2000.0;
-    self.showDelaySlider.value = self.showDelayValue;
-    [self.showDelaySlider addTarget:self action:@selector(showDelaySliderChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.menuView addSubview:self.showDelaySlider];
-    
-    // Button Tắt Hoàn toàn / Giải phóng RAM
-    UIButton *cleanupButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    cleanupButton.frame = CGRectMake(16, 342, 248, 30);
-    [cleanupButton setTitle:@"🔴 Tắt hoàn toàn & Giải phóng RAM" forState:UIControlStateNormal];
-    [cleanupButton setTitleColor:[UIColor colorWithRed:1.0 green:0.3 blue:0.3 alpha:1.0] forState:UIControlStateNormal];
-    cleanupButton.titleLabel.font = [UIFont boldSystemFontOfSize:13];
-    [cleanupButton addTarget:self action:@selector(cleanupTool) forControlEvents:UIControlEventTouchUpInside];
-    [self.menuView addSubview:cleanupButton];
-    
-    // Button Đóng Menu
-    UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    closeButton.frame = CGRectMake(16, 380, 248, 30);
-    [closeButton setTitle:@"Đóng Menu" forState:UIControlStateNormal];
-    [closeButton setTitleColor:[UIColor lightGrayColor] forState:UIControlStateNormal];
-    closeButton.titleLabel.font = [UIFont systemFontOfSize:13];
-    [closeButton addTarget:self action:@selector(floatingButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.menuView addSubview:closeButton];
-    
-    [self addSubview:self.menuView];
-}
+    struct sockaddr_un address;
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    strlcpy(address.sun_path, kOverlayRealtimeSocketPath, sizeof(address.sun_path));
 
-// ============================================================================
-// Bật/Tắt Menu điều khiển
-// ============================================================================
-- (void)floatingButtonTapped {
-    self.isMenuExpanded = !self.isMenuExpanded;
-    
-    if (self.isMenuExpanded) {
-        self.menuView.hidden = NO;
-        CGRect btnFrame = self.floatingButton.frame;
-        CGRect screenBounds = [UIScreen mainScreen].bounds;
-        
-        CGFloat menuX = btnFrame.origin.x;
-        CGFloat menuY = btnFrame.origin.y + btnFrame.size.height + 10;
-        
-        if (menuX + self.menuView.frame.size.width > screenBounds.size.width) {
-            menuX = screenBounds.size.width - self.menuView.frame.size.width - 20;
-        }
-        if (menuX < 20) {
-            menuX = 20;
-        }
-        if (menuY + self.menuView.frame.size.height > screenBounds.size.height) {
-            menuY = btnFrame.origin.y - self.menuView.frame.size.height - 10;
-        }
-        
-        self.menuView.frame = CGRectMake(menuX, menuY, self.menuView.frame.size.width, self.menuView.frame.size.height);
-        
-        [UIView animateWithDuration:0.3 animations:^{
-            self.menuView.alpha = 1.0;
-            self.floatingButton.transform = CGAffineTransformMakeRotation(M_PI_4);
-        }];
-    } else {
-        [UIView animateWithDuration:0.3 animations:^{
-            self.menuView.alpha = 0.0;
-            self.floatingButton.transform = CGAffineTransformIdentity;
-        } completion:^(BOOL finished) {
-            if (finished) {
-                self.menuView.hidden = YES;
-            }
-        }];
+    ssize_t sent = sendto(gRealtimeClientSocket,
+                          &message,
+                          sizeof(message),
+                          0,
+                          (struct sockaddr *)&address,
+                          sizeof(address));
+    if (sent < 0) {
+        close(gRealtimeClientSocket);
+        gRealtimeClientSocket = -1;
     }
 }
 
-// ============================================================================
-// Di chuyển nút cấu hình
-// ============================================================================
-- (void)handlePanGesture:(UIPanGestureRecognizer *)gesture {
-    CGPoint translation = [gesture translationInView:self];
-    CGPoint newCenter = CGPointMake(gesture.view.center.x + translation.x, gesture.view.center.y + translation.y);
-    
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
-    CGFloat halfWidth = gesture.view.frame.size.width / 2.0;
-    CGFloat halfHeight = gesture.view.frame.size.height / 2.0;
-    
-    CGFloat padding = 10.0;
-    newCenter.x = MIN(MAX(newCenter.x, halfWidth + padding), screenBounds.size.width - halfWidth - padding);
-    newCenter.y = MIN(MAX(newCenter.y, halfHeight + padding), screenBounds.size.height - halfHeight - padding);
-    
-    gesture.view.center = newCenter;
-    [gesture setTranslation:CGPointZero inView:self];
-    
-    if (gesture.state == UIGestureRecognizerStateBegan && self.isMenuExpanded) {
-        [self floatingButtonTapped];
-    }
-}
-
-// ============================================================================
-// Xử lý thay đổi cấu hình
-// ============================================================================
-- (void)toggleSwitchChanged:(UISwitch *)sender {
-    self.isToggleClickEnabled = sender.isOn;
-    [self saveSettings];
-    
-    if (!self.isToggleClickEnabled) {
-        // Hủy bỏ các hiệu ứng trễ và hiển thị lại ảnh ngay lập tức
-        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(animateToTargetVisibility) object:nil];
-        self.targetImageVisible = YES;
-        self.isImageVisible = YES;
-        if (self.imageWindow) {
-            [UIView animateWithDuration:0.2 animations:^{
-                self.imageWindow.alpha = 1.0;
-            }];
-        }
-    } else {
-        self.targetImageVisible = self.isImageVisible;
-    }
-}
-
-- (void)hideDelaySliderChanged:(UISlider *)sender {
-    self.hideDelayValue = (NSInteger)sender.value;
-    self.hideDelayLabel.text = [NSString stringWithFormat:@"Trễ ẩn: %ld ms", (long)self.hideDelayValue];
-    [self saveSettings];
-}
-
-- (void)showDelaySliderChanged:(UISlider *)sender {
-    self.showDelayValue = (NSInteger)sender.value;
-    self.showDelayLabel.text = [NSString stringWithFormat:@"Trễ hiện: %ld ms", (long)self.showDelayValue];
-    [self saveSettings];
-}
-
-// ============================================================================
-// Mở cửa sổ chọn ảnh
-// ============================================================================
-- (void)selectImageButtonTapped {
-    PHPickerConfiguration *config = [[PHPickerConfiguration alloc] init];
-    config.filter = [PHPickerFilter imagesFilter];
-    config.selectionLimit = 1;
-    
-    PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:config];
-    picker.delegate = self;
-    
-    // Ẩn tạm thời menu khi hiển thị picker
-    if (self.isMenuExpanded) {
-        [self floatingButtonTapped];
-    }
-    
-    // Tìm rootViewController của OverlayWindow để present picker
-    UIViewController *rootVC = self.rootViewController;
-    if (rootVC) {
-        // Nếu rootVC đang present gì đó, dismiss trước
-        if (rootVC.presentedViewController) {
-            [rootVC dismissViewControllerAnimated:NO completion:^{
-                [rootVC presentViewController:picker animated:YES completion:nil];
-            }];
-        } else {
-            [rootVC presentViewController:picker animated:YES completion:nil];
-        }
-    }
-}
-
-// ============================================================================
-// Delegate của PHPickerViewController
-// ============================================================================
-- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
-    [picker dismissViewControllerAnimated:YES completion:nil];
-    
-    if (results.count == 0) {
+static void syncOverlayStateRealtime(BOOL force) {
+    if (!gOverlayImageView || gApplyingRemoteState) {
         return;
     }
-    
-    PHPickerResult *result = results.firstObject;
-    NSItemProvider *provider = result.itemProvider;
-    
-    if ([provider canLoadObjectOfClass:[UIImage class]]) {
-        [provider loadObjectOfClass:[UIImage class] completionHandler:^(id<NSItemProviderWriting>  _Nullable object, NSError * _Nullable error) {
-            if (error) {
-                return;
-            }
-            if ([object isKindOfClass:[UIImage class]]) {
-                UIImage *image = (UIImage *)object;
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [self displayImage:image];
-                });
-            }
-        }];
-    }
-}
 
-// ============================================================================
-// Hiển thị ảnh lớp phủ ở độ phân giải gốc và khôi phục về trạng thái căn giữa
-// ============================================================================
-- (void)displayImage:(UIImage *)image {
-    // Giải phóng ảnh cũ hoàn toàn
-    if (self.imageView) {
-        // Gỡ gesture recognizers để tránh retain cycle
-        for (UIGestureRecognizer *gr in self.imageView.gestureRecognizers.copy) {
-            [self.imageView removeGestureRecognizer:gr];
-        }
-        [self.imageView removeFromSuperview];
-        self.imageView = nil;
-    }
-    
-    self.selectedImage = image;
-    
-    // Khởi tạo cửa sổ ảnh nếu chưa có
-    if (!self.imageWindow) {
-        self.imageWindow = [[ImageWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        self.imageWindow.backgroundColor = [UIColor clearColor];
-        
-        // Thấp hơn cửa sổ menu của tweak, nhưng cao hơn toàn bộ app khác
-        self.imageWindow.windowLevel = UIWindowLevelStatusBar + 50.0;
-        
-        UIViewController *rootVC = [[UIViewController alloc] init];
-        rootVC.view.backgroundColor = [UIColor clearColor];
-        // [Fix Bug #4] PHẢI bật userInteractionEnabled để gesture trên imageView hoạt động
-        rootVC.view.userInteractionEnabled = YES;
-        self.imageWindow.rootViewController = rootVC;
-        
-        // [Fix Bug #5] KHÔNG gọi makeKeyAndVisible — chỉ hiện window
-        // makeKeyAndVisible sẽ cướp key window khỏi app, hỏng keyboard/text input
-        self.imageWindow.hidden = NO;
-    }
-    
-    // Tạo UIImageView mới hiển thị ảnh (không bóng đổ, không viền)
-    self.imageView = [[UIImageView alloc] initWithImage:image];
-    self.imageView.contentMode = UIViewContentModeScaleAspectFit;
-    self.imageView.backgroundColor = [UIColor clearColor];
-    self.imageView.userInteractionEnabled = YES;
-    
-    // Gán tham chiếu yếu trong ImageWindow để kiểm tra chạm xuyên qua
-    self.imageWindow.targetImageView = self.imageView;
-    
-    // Tính toán kích thước ban đầu để nằm vừa vặn trong màn hình và giữ nguyên tỷ lệ
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
-    CGFloat imgWidth = image.size.width;
-    CGFloat imgHeight = image.size.height;
-    CGFloat scale = MIN(screenBounds.size.width / imgWidth, screenBounds.size.height / imgHeight);
-    if (scale > 1.0) {
-        scale = 1.0; // Không phóng to quá kích thước gốc
-    }
-    
-    CGFloat targetWidth = imgWidth * scale;
-    CGFloat targetHeight = imgHeight * scale;
-    
-    self.imageView.frame = CGRectMake(0, 0, targetWidth, targetHeight);
-    self.imageView.center = CGPointMake(screenBounds.size.width / 2.0, screenBounds.size.height / 2.0);
-    
-    // Lưu lại vị trí và kích thước gốc để phục hồi khi cần
-    self.originalFrame = self.imageView.frame;
-    self.originalCenter = self.imageView.center;
-    
-    // Gắn gesture recognizer để di chuyển và phóng to thu nhỏ
-    UIPanGestureRecognizer *panGesture = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleImagePan:)];
-    panGesture.delegate = self;
-    [self.imageView addGestureRecognizer:panGesture];
-    
-    UIPinchGestureRecognizer *pinchGesture = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handleImagePinch:)];
-    pinchGesture.delegate = self;
-    [self.imageView addGestureRecognizer:pinchGesture];
-    
-    // [Fix Bug #8] Add vào rootViewController.view thay vì trực tiếp vào window
-    [self.imageWindow.rootViewController.view addSubview:self.imageView];
-    
-    self.isImageVisible = YES;
-    self.targetImageVisible = YES;
-    self.imageWindow.alpha = 1.0;
-}
-
-// ============================================================================
-// Xử lý di chuyển ảnh — không giới hạn vùng (cho phép kéo ra ngoài màn hình)
-// ============================================================================
-- (void)handleImagePan:(UIPanGestureRecognizer *)sender {
-    UIView *view = sender.view;
-    if (sender.state == UIGestureRecognizerStateBegan || sender.state == UIGestureRecognizerStateChanged) {
-        CGPoint translation = [sender translationInView:view.superview];
-        view.center = CGPointMake(view.center.x + translation.x, view.center.y + translation.y);
-        [sender setTranslation:CGPointZero inView:view.superview];
-    }
-}
-
-// ============================================================================
-// Xử lý phóng to/thu nhỏ ảnh
-// ============================================================================
-- (void)handleImagePinch:(UIPinchGestureRecognizer *)sender {
-    UIView *view = sender.view;
-    if (sender.state == UIGestureRecognizerStateBegan || sender.state == UIGestureRecognizerStateChanged) {
-        view.transform = CGAffineTransformScale(view.transform, sender.scale, sender.scale);
-        sender.scale = 1.0;
-    }
-}
-
-// Đồng ý cho nhiều cử chỉ chạy đồng thời (vừa zoom vừa kéo)
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    return YES;
-}
-
-// ============================================================================
-// Khôi phục ảnh về vị trí và độ phân giải gốc
-// ============================================================================
-- (void)resetImagePosition {
-    if (self.imageView) {
-        [UIView animateWithDuration:0.3 animations:^{
-            self.imageView.transform = CGAffineTransformIdentity;
-            self.imageView.frame = self.originalFrame;
-            self.imageView.center = self.originalCenter;
-        }];
-    }
-}
-
-// ============================================================================
-// Xử lý nhận sự kiện chạm màn hình để ẩn/hiện đan xen
-// Hàm này được gọi trên main thread nhờ touchCallback dispatch_async
-// ============================================================================
-- (void)handleTouchDetectedNotification {
-    if (!self.isToggleClickEnabled || !self.imageWindow || !self.imageView) {
+    CFTimeInterval now = CACurrentMediaTime();
+    if (!force && now - gLastRealtimeStateSync < (1.0 / 60.0)) {
         return;
     }
-    
-    // Đảo ngược trạng thái ẩn/hiện mục tiêu
-    self.targetImageVisible = !self.targetImageVisible;
-    
-    // Hủy bỏ các yêu cầu ẩn/hiện trước đó đang xếp hàng chờ
-    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(animateToTargetVisibility) object:nil];
-    
-    // Lấy thời gian trễ tương ứng
-    NSTimeInterval delay = 0.0;
-    if (self.targetImageVisible) {
-        delay = self.showDelayValue / 1000.0;
-    } else {
-        delay = self.hideDelayValue / 1000.0;
+
+    gLastRealtimeStateSync = now;
+    sendRealtimeOverlayState();
+    if (force) {
+        persistOverlayState(YES);
     }
-    
-    // Lên lịch thực hiện đổi trạng thái ẩn/hiện sau khi hết thời gian trễ
-    [self performSelector:@selector(animateToTargetVisibility) withObject:nil afterDelay:delay];
 }
 
-- (void)animateToTargetVisibility {
-    CGFloat targetAlpha = self.targetImageVisible ? 1.0 : 0.0;
-    [UIView animateWithDuration:0.15 animations:^{
-        self.imageWindow.alpha = targetAlpha;
-    } completion:^(BOOL finished) {
-        if (finished) {
-            self.isImageVisible = self.targetImageVisible;
-        }
+static CGRect frameFromOverlayState(NSDictionary *state) {
+    NSDictionary *frameState = state[@"frame"];
+    if (![frameState isKindOfClass:NSDictionary.class]) {
+        return CGRectNull;
+    }
+
+    CGFloat x = [frameState[@"x"] doubleValue];
+    CGFloat y = [frameState[@"y"] doubleValue];
+    CGFloat w = [frameState[@"w"] doubleValue];
+    CGFloat h = [frameState[@"h"] doubleValue];
+    if (w < 2 || h < 2) {
+        return CGRectNull;
+    }
+
+    return CGRectMake(x, y, w, h);
+}
+
+static CGRect centeredFrameForImage(UIImage *image) {
+    CGRect bounds = UIScreen.mainScreen.bounds;
+    CGSize imageSize = image.size;
+
+    if (imageSize.width <= 0 || imageSize.height <= 0) {
+        return CGRectInset(bounds, bounds.size.width * 0.2, bounds.size.height * 0.35);
+    }
+
+    CGFloat maxWidth = bounds.size.width * 0.72;
+    CGFloat maxHeight = bounds.size.height * 0.72;
+    CGFloat scale = MIN(maxWidth / imageSize.width, maxHeight / imageSize.height);
+    scale = MIN(MAX(scale, 0.08), 1.0);
+
+    CGSize overlaySize = CGSizeMake(imageSize.width * scale, imageSize.height * scale);
+    return CGRectMake((bounds.size.width - overlaySize.width) / 2.0,
+                      (bounds.size.height - overlaySize.height) / 2.0,
+                      overlaySize.width,
+                      overlaySize.height);
+}
+
+static void configureRawImageView(UIImageView *imageView) {
+    imageView.backgroundColor = UIColor.clearColor;
+    imageView.contentMode = UIViewContentModeScaleAspectFit;
+    imageView.userInteractionEnabled = YES;
+    imageView.clipsToBounds = YES;
+    imageView.layer.borderWidth = 0;
+    imageView.layer.shadowOpacity = 0;
+    imageView.layer.shadowRadius = 0;
+    imageView.layer.shadowOffset = CGSizeZero;
+    imageView.layer.cornerRadius = 0;
+    imageView.layer.masksToBounds = YES;
+}
+
+static void applyOverlayAlpha(void) {
+    if (!gOverlayImageView) {
+        return;
+    }
+    gOverlayImageView.alpha = gOverlayDimmed ? gDimOpacity : 1.0;
+}
+
+static void animateOverlayAlphaForCurrentDimState(void) {
+    if (!gOverlayImageView) {
+        return;
+    }
+
+    CGFloat targetAlpha = gOverlayDimmed ? gDimOpacity : 1.0;
+    if (gDimAnimationMs <= 0) {
+        gOverlayImageView.alpha = targetAlpha;
+        return;
+    }
+
+    [UIView animateWithDuration:gDimAnimationMs / 1000.0
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveLinear
+                     animations:^{
+        gOverlayImageView.alpha = targetAlpha;
+    } completion:nil];
+}
+
+static BOOL rendersOverlayImage(void) {
+    return gIsSpringBoardProcess;
+}
+
+static CGFloat overlayWindowLevel(void) {
+    return UIWindowLevelAlert + 100000.0;
+}
+
+static void refreshOverlayWindowVisibility(void) {
+    if (!gOverlayWindow) {
+        return;
+    }
+
+    // Khi khoá/tắt màn hình: chỉ ẩn cửa sổ, KHÔNG xoá ảnh/state.
+    BOOL lockHidden = gScreenBlanked || gScreenLocked || gDataUnavailable;
+    BOOL baseHidden = !gOverlayVisible && !gScaleLockModeEnabled;
+    gOverlayWindow.hidden = lockHidden || baseHidden;
+
+    if (rendersOverlayImage()) {
+        gOverlayWindow.userInteractionEnabled = YES;
+    } else {
+        gOverlayWindow.userInteractionEnabled = gOverlayVisible || gScaleLockModeEnabled;
+    }
+}
+
+static void finishOverlayQuickActions(void) {
+    gQuickActionsVisible = NO;
+    [gQuickActionsPanel removeFromSuperview];
+    [gQuickActionsCancelButton removeFromSuperview];
+    [gQuickActionsBackdrop removeFromSuperview];
+    gQuickActionsPanel = nil;
+    gQuickActionsCancelButton = nil;
+    gQuickActionsBackdrop = nil;
+    refreshOverlayWindowVisibility();
+}
+
+static void dismissOverlayQuickActions(void) {
+    if (!gQuickActionsVisible) {
+        return;
+    }
+
+    UIView *panel = gQuickActionsPanel;
+    UIControl *backdrop = gQuickActionsBackdrop;
+    UIButton *cancelButton = gQuickActionsCancelButton;
+    [UIView animateWithDuration:0.18
+                     animations:^{
+        panel.alpha = 0.0;
+        panel.transform = CGAffineTransformMakeTranslation(0.0, 24.0);
+        backdrop.alpha = 0.0;
+        cancelButton.alpha = 0.0;
+    } completion:^(__unused BOOL finished) {
+        finishOverlayQuickActions();
     }];
 }
 
-// ============================================================================
-// Tắt hoàn toàn và Giải phóng RAM
-// ============================================================================
-- (void)cleanupTool {
-    // Hủy mọi pending selector (delay timers)
-    [NSObject cancelPreviousPerformRequestsWithTarget:self];
-    
-    // Gỡ gesture recognizers
-    if (self.imageView) {
-        for (UIGestureRecognizer *gr in self.imageView.gestureRecognizers.copy) {
-            [self.imageView removeGestureRecognizer:gr];
+static UILabel *quickActionsLabel(NSString *text, CGFloat fontSize, UIFontWeight weight) {
+    UILabel *label = [UILabel new];
+    label.text = text;
+    label.textColor = UIColor.whiteColor;
+    label.textAlignment = NSTextAlignmentCenter;
+    label.numberOfLines = 0;
+    label.font = [UIFont systemFontOfSize:fontSize weight:weight];
+    return label;
+}
+
+static UIButton *quickActionsButton(NSString *title, SEL action) {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    [button setTitle:title forState:UIControlStateNormal];
+    [button setTitleColor:[UIColor colorWithRed:0.10 green:0.52 blue:1.0 alpha:1.0]
+                 forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont systemFontOfSize:22.0 weight:UIFontWeightRegular];
+    button.backgroundColor = [UIColor colorWithWhite:0.11 alpha:0.98];
+    [button addTarget:gGestureHandler action:action forControlEvents:UIControlEventTouchUpInside];
+    return button;
+}
+
+static void showOverlayQuickActions(void) {
+    if (gScaleLockModeEnabled || gQuickActionsVisible || !gOverlayWindow || !gOverlayWindow.rootViewController) {
+        return;
+    }
+
+    if (!gGestureHandler) {
+        gGestureHandler = [OverlayGestureHandler new];
+    }
+
+    UIView *rootView = gOverlayWindow.rootViewController.view;
+    CGRect bounds = rootView.bounds;
+    CGFloat margin = 12.0;
+    CGFloat safeBottom = MAX(gOverlayWindow.safeAreaInsets.bottom, 10.0);
+    CGFloat cancelHeight = 64.0;
+    CGFloat panelHeight = 274.0;
+    CGFloat panelWidth = bounds.size.width - margin * 2.0;
+
+    gQuickActionsVisible = YES;
+    gQuickActionsBackdrop = [[UIControl alloc] initWithFrame:bounds];
+    gQuickActionsBackdrop.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    gQuickActionsBackdrop.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.56];
+    [gQuickActionsBackdrop addTarget:gGestureHandler
+                              action:@selector(handleQuickActionsBackgroundButton:)
+                    forControlEvents:UIControlEventTouchUpInside];
+    [rootView addSubview:gQuickActionsBackdrop];
+
+    CGFloat cancelY = bounds.size.height - safeBottom - cancelHeight;
+    gQuickActionsCancelButton = quickActionsButton(@"Hủy", @selector(handleQuickActionsCancelButton:));
+    gQuickActionsCancelButton.frame = CGRectMake(margin, cancelY, panelWidth, cancelHeight);
+    gQuickActionsCancelButton.layer.cornerRadius = 13.0;
+    gQuickActionsCancelButton.layer.masksToBounds = YES;
+    [rootView addSubview:gQuickActionsCancelButton];
+
+    CGFloat panelY = cancelY - 10.0 - panelHeight;
+    gQuickActionsPanel = [[UIView alloc] initWithFrame:CGRectMake(margin, panelY, panelWidth, panelHeight)];
+    gQuickActionsPanel.backgroundColor = [UIColor colorWithWhite:0.11 alpha:0.98];
+    gQuickActionsPanel.layer.cornerRadius = 13.0;
+    gQuickActionsPanel.layer.masksToBounds = YES;
+    [rootView addSubview:gQuickActionsPanel];
+
+    UILabel *titleLabel = quickActionsLabel(@"Số dư", 18.0, UIFontWeightSemibold);
+    titleLabel.frame = CGRectMake(16.0, 17.0, panelWidth - 32.0, 26.0);
+    [gQuickActionsPanel addSubview:titleLabel];
+
+    UILabel *messageLabel = quickActionsLabel(@"Nhanh chóng di chuyển đến trang nạp/rút tiền trên trang web của broker",
+                                               15.0,
+                                               UIFontWeightRegular);
+    messageLabel.textColor = [UIColor colorWithWhite:0.76 alpha:1.0];
+    messageLabel.frame = CGRectMake(22.0, 47.0, panelWidth - 44.0, 52.0);
+    [gQuickActionsPanel addSubview:messageLabel];
+
+    UIView *separator1 = [[UIView alloc] initWithFrame:CGRectMake(0.0, 112.0, panelWidth, 0.5)];
+    separator1.backgroundColor = [UIColor colorWithWhite:0.35 alpha:0.7];
+    [gQuickActionsPanel addSubview:separator1];
+
+    UIButton *depositButton = quickActionsButton(@"Tiền nạp", @selector(handleQuickActionsDepositButton:));
+    depositButton.frame = CGRectMake(0.0, 112.5, panelWidth, 80.5);
+    [gQuickActionsPanel addSubview:depositButton];
+
+    UIView *separator2 = [[UIView alloc] initWithFrame:CGRectMake(0.0, 193.0, panelWidth, 0.5)];
+    separator2.backgroundColor = [UIColor colorWithWhite:0.35 alpha:0.7];
+    [gQuickActionsPanel addSubview:separator2];
+
+    UIButton *withdrawButton = quickActionsButton(@"Tiền rút", @selector(handleQuickActionsWithdrawButton:));
+    withdrawButton.frame = CGRectMake(0.0, 193.5, panelWidth, panelHeight - 193.5);
+    [gQuickActionsPanel addSubview:withdrawButton];
+
+    gQuickActionsBackdrop.alpha = 0.0;
+    gQuickActionsPanel.alpha = 0.0;
+    gQuickActionsPanel.transform = CGAffineTransformMakeTranslation(0.0, 24.0);
+    gQuickActionsCancelButton.alpha = 0.0;
+
+    [UIView animateWithDuration:0.2 animations:^{
+        gQuickActionsBackdrop.alpha = 1.0;
+        gQuickActionsPanel.alpha = 1.0;
+        gQuickActionsPanel.transform = CGAffineTransformIdentity;
+        gQuickActionsCancelButton.alpha = 1.0;
+    }];
+}
+
+static void attachGestures(UIImageView *imageView) {
+    if (!gGestureHandler) {
+        gGestureHandler = [OverlayGestureHandler new];
+    }
+
+    gImagePanGesture = [[UIPanGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handlePan:)];
+    gImagePanGesture.maximumNumberOfTouches = 1;
+    gImagePanGesture.delegate = gGestureHandler;
+    [imageView addGestureRecognizer:gImagePanGesture];
+
+    gImagePinchGesture = [[UIPinchGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handlePinch:)];
+    gImagePinchGesture.delegate = gGestureHandler;
+    [imageView addGestureRecognizer:gImagePinchGesture];
+
+    gImageLongPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleLongPress:)];
+    gImageLongPressGesture.minimumPressDuration = 1.0;
+    gImageLongPressGesture.allowableMovement = 12.0;
+    gImageLongPressGesture.delegate = gGestureHandler;
+    [imageView addGestureRecognizer:gImageLongPressGesture];
+
+    gQuickActionsTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleQuickActionsTap:)];
+    gQuickActionsTapGesture.numberOfTapsRequired = 1;
+    gQuickActionsTapGesture.delegate = gGestureHandler;
+    [gQuickActionsTapGesture requireGestureRecognizerToFail:gImageLongPressGesture];
+    [imageView addGestureRecognizer:gQuickActionsTapGesture];
+}
+
+static void ensureOverlayWindow(void) {
+    if (gOverlayWindow || !gOverlayHostReady) {
+        return;
+    }
+
+    CGRect bounds = UIScreen.mainScreen.bounds;
+    gOverlayWindow = [[OverlayPassthroughWindow alloc] initWithFrame:bounds];
+    gOverlayWindow.windowLevel = overlayWindowLevel();
+    gOverlayWindow.backgroundColor = UIColor.clearColor;
+    gOverlayWindow.opaque = NO;
+    gOverlayWindow.clipsToBounds = NO;
+
+    UIViewController *rootViewController = [UIViewController new];
+    rootViewController.view.backgroundColor = UIColor.clearColor;
+    rootViewController.view.userInteractionEnabled = YES;
+    gOverlayWindow.rootViewController = rootViewController;
+    gOverlayWindow.hidden = NO;
+}
+
+static void applyScaleLockMode(BOOL enabled);
+
+static void applyOverlayStateFromDisk(void) {
+    if (!gOverlayImageView) {
+        return;
+    }
+
+    NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:kOverlayStatePath];
+    if (![state isKindOfClass:NSDictionary.class]) {
+        return;
+    }
+
+    gApplyingRemoteState = YES;
+
+    CGRect frame = frameFromOverlayState(state);
+    if (!CGRectIsNull(frame)) {
+        gOverlayImageView.frame = frame;
+    }
+
+    if (state[@"overlayVisible"]) {
+        gOverlayVisible = [state[@"overlayVisible"] boolValue];
+        gOverlayImageView.hidden = !gOverlayVisible;
+    }
+
+    if (state[@"overlayDimmed"]) {
+        gOverlayDimmed = [state[@"overlayDimmed"] boolValue];
+    }
+
+    if (state[@"dimOpacity"]) {
+        gDimOpacity = MAX(0.0, MIN([state[@"dimOpacity"] doubleValue], 1.0));
+    }
+
+    if (state[@"dimAnimationMs"]) {
+        gDimAnimationMs = MAX(0, MIN([state[@"dimAnimationMs"] integerValue], 10000));
+    }
+
+    if (state[@"scaleLockModeEnabled"]) {
+        applyScaleLockMode([state[@"scaleLockModeEnabled"] boolValue]);
+    }
+
+    applyOverlayAlpha();
+    updateOverlayControlValues();
+    updateScaleLockControlsVisibility();
+    refreshOverlayWindowVisibility();
+
+    gApplyingRemoteState = NO;
+}
+
+static CGRect expandedScaleHitboxInRootView(void) {
+    if (!gOverlayImageView || !gOverlayWindow) {
+        return CGRectNull;
+    }
+
+    UIView *rootView = gOverlayWindow.rootViewController.view;
+    CGRect imageFrame = [gOverlayImageView.superview convertRect:gOverlayImageView.frame toView:rootView];
+    CGFloat inflateX = MAX(imageFrame.size.width * 25.0, 240.0);
+    CGFloat inflateY = MAX(imageFrame.size.height * 25.0, 240.0);
+    return CGRectInset(imageFrame, -inflateX, -inflateY);
+}
+
+static void updateExpandedPinchGesture(void) {
+    if (!gOverlayWindow || !gGestureHandler) {
+        return;
+    }
+
+    UIView *rootView = gOverlayWindow.rootViewController.view;
+    if (!gExpandedPinchGesture) {
+        gExpandedPinchGesture = [[UIPinchGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleExpandedPinch:)];
+        gExpandedPinchGesture.cancelsTouchesInView = YES;
+        gExpandedPinchGesture.delegate = gGestureHandler;
+        [rootView addGestureRecognizer:gExpandedPinchGesture];
+    }
+
+    if (!gRelativePanGesture) {
+        gRelativePanGesture = [[UIPanGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleRelativePan:)];
+        gRelativePanGesture.minimumNumberOfTouches = 1;
+        gRelativePanGesture.maximumNumberOfTouches = 1;
+        gRelativePanGesture.cancelsTouchesInView = YES;
+        gRelativePanGesture.delegate = gGestureHandler;
+        [rootView addGestureRecognizer:gRelativePanGesture];
+    }
+
+    if (!gInputBlockTapGesture) {
+        gInputBlockTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleBlockedTap:)];
+        gInputBlockTapGesture.cancelsTouchesInView = YES;
+        gInputBlockTapGesture.delegate = gGestureHandler;
+        [gInputBlockTapGesture requireGestureRecognizerToFail:gExpandedPinchGesture];
+        [gInputBlockTapGesture requireGestureRecognizerToFail:gRelativePanGesture];
+        [rootView addGestureRecognizer:gInputBlockTapGesture];
+    }
+}
+
+static UILabel *overlayControlLabel(NSString *text, CGFloat fontSize, UIFontWeight weight) {
+    UILabel *label = [UILabel new];
+    label.text = text;
+    label.textColor = UIColor.whiteColor;
+    label.font = [UIFont systemFontOfSize:fontSize weight:weight];
+    return label;
+}
+
+static void writeOverlaySettings(void) {
+    NSDictionary *settings = @{
+        @"toggleClickEnabled": @(gToggleClickEnabled),
+        @"hideDelayMs": @(gHideDelayMs),
+        @"showDelayMs": @(gShowDelayMs),
+        @"dimOpacity": @(gDimOpacity),
+        @"dimAnimationMs": @(gDimAnimationMs)
+    };
+    [NSFileManager.defaultManager createDirectoryAtPath:[kOverlaySettingsPath stringByDeletingLastPathComponent]
+                            withIntermediateDirectories:YES
+                                             attributes:nil
+                                                  error:nil];
+    [settings writeToFile:kOverlaySettingsPath atomically:YES];
+    notify_post(kOverlaySettingsNotification);
+}
+
+static void updateOverlayControlValues(void) {
+    if (!gScaleLockControlsPanel) {
+        return;
+    }
+
+    if (gOverlayHideDelaySlider && !gOverlayHideDelaySlider.tracking) {
+        gOverlayHideDelaySlider.value = gHideDelayMs;
+    }
+    if (gOverlayShowDelaySlider && !gOverlayShowDelaySlider.tracking) {
+        gOverlayShowDelaySlider.value = gShowDelayMs;
+    }
+    if (gOverlayDimOpacitySlider && !gOverlayDimOpacitySlider.tracking) {
+        gOverlayDimOpacitySlider.value = gDimOpacity;
+    }
+    if (gOverlayDimAnimationSlider && !gOverlayDimAnimationSlider.tracking) {
+        gOverlayDimAnimationSlider.value = gDimAnimationMs;
+    }
+
+    gOverlayHideDelayValueLabel.text = [NSString stringWithFormat:@"%ld ms", (long)gHideDelayMs];
+    gOverlayShowDelayValueLabel.text = [NSString stringWithFormat:@"%ld ms", (long)gShowDelayMs];
+    gOverlayDimOpacityValueLabel.text = [NSString stringWithFormat:@"%.0f%%", gDimOpacity * 100.0];
+    gOverlayDimAnimationValueLabel.text = [NSString stringWithFormat:@"%ld ms", (long)gDimAnimationMs];
+    NSString *buttonTitle = gToggleClickEnabled ? @"Tat Toggle Click" : @"Bat Toggle Click";
+    [gToggleClickButton setTitle:buttonTitle forState:UIControlStateNormal];
+}
+
+static void updateScaleLockControlsVisibility(void) {
+    if (!gScaleLockControlsPanel) {
+        return;
+    }
+    gScaleLockControlsPanel.hidden = !gScaleLockModeEnabled;
+    gScaleLockControlsPanel.alpha = rendersOverlayImage() ? 1.0 : 0.02;
+}
+
+static BOOL pointInsideScaleLockControls(CGPoint pointInWindow) {
+    if (!gScaleLockControlsPanel || gScaleLockControlsPanel.hidden || !gOverlayWindow) {
+        return NO;
+    }
+    CGPoint point = [gScaleLockControlsPanel convertPoint:pointInWindow fromView:gOverlayWindow];
+    return [gScaleLockControlsPanel pointInside:point withEvent:nil];
+}
+
+static void overlayHideDelayChanged(UISlider *slider) {
+    gHideDelayMs = (NSInteger)slider.value;
+    updateOverlayControlValues();
+    writeOverlaySettings();
+}
+
+static void overlayShowDelayChanged(UISlider *slider) {
+    gShowDelayMs = (NSInteger)slider.value;
+    updateOverlayControlValues();
+    writeOverlaySettings();
+}
+
+static void overlayDimOpacityChanged(UISlider *slider) {
+    gDimOpacity = MAX(0.0, MIN(slider.value, 1.0));
+    applyOverlayAlpha();
+    updateOverlayControlValues();
+    writeOverlaySettings();
+    persistOverlayState(YES);
+}
+
+static void overlayDimAnimationChanged(UISlider *slider) {
+    gDimAnimationMs = (NSInteger)slider.value;
+    updateOverlayControlValues();
+    writeOverlaySettings();
+}
+
+static void toggleClickTapped(__unused UIButton *button) {
+    gToggleClickEnabled = !gToggleClickEnabled;
+    if (!gToggleClickEnabled) {
+        gOverlayDimmed = NO;
+    }
+    applyOverlayAlpha();
+    updateOverlayControlValues();
+    writeOverlaySettings();
+    persistOverlayState(YES);
+}
+
+static void hideImageFromPanelTapped(__unused UIButton *button) {
+    if (!gOverlayImageView) {
+        return;
+    }
+
+    if (gScaleLockModeEnabled) {
+        applyScaleLockMode(NO);
+    }
+    gOverlayVisible = NO;
+    gOverlayDimmed = NO;
+    gToggleGeneration++;
+    gOverlayImageView.hidden = YES;
+    gOverlayImageView.layer.borderWidth = 0;
+    gOverlayImageView.layer.borderColor = nil;
+    applyOverlayAlpha();
+    updateScaleLockControlsVisibility();
+    refreshOverlayWindowVisibility();
+    persistOverlayState(YES);
+    syncOverlayStateRealtime(YES);
+}
+
+@interface OverlayControlTarget : NSObject
+- (void)hideDelayChanged:(UISlider *)slider;
+- (void)showDelayChanged:(UISlider *)slider;
+- (void)dimOpacityChanged:(UISlider *)slider;
+- (void)dimAnimationChanged:(UISlider *)slider;
+- (void)toggleClickTapped:(UIButton *)button;
+- (void)hideImageTapped:(UIButton *)button;
+@end
+
+@implementation OverlayControlTarget
+- (void)hideDelayChanged:(UISlider *)slider { overlayHideDelayChanged(slider); }
+- (void)showDelayChanged:(UISlider *)slider { overlayShowDelayChanged(slider); }
+- (void)dimOpacityChanged:(UISlider *)slider { overlayDimOpacityChanged(slider); }
+- (void)dimAnimationChanged:(UISlider *)slider { overlayDimAnimationChanged(slider); }
+- (void)toggleClickTapped:(UIButton *)button { toggleClickTapped(button); }
+- (void)hideImageTapped:(UIButton *)button { hideImageFromPanelTapped(button); }
+@end
+
+static OverlayControlTarget *gOverlayControlTarget = nil;
+
+static void ensureScaleLockControls(void) {
+    if (!gOverlayWindow || gScaleLockControlsPanel) {
+        return;
+    }
+
+    if (!gOverlayControlTarget) {
+        gOverlayControlTarget = [OverlayControlTarget new];
+    }
+
+    UIView *rootView = gOverlayWindow.rootViewController.view;
+    CGRect bounds = rootView.bounds;
+    CGFloat safeBottom = gOverlayWindow.safeAreaInsets.bottom;
+    CGFloat panelHeight = 328.0;
+    CGFloat margin = 12.0;
+    gScaleLockControlsPanel = [[UIView alloc] initWithFrame:CGRectMake(margin,
+                                                                       bounds.size.height - panelHeight - MAX(safeBottom, margin),
+                                                                       bounds.size.width - margin * 2.0,
+                                                                       panelHeight)];
+    gScaleLockControlsPanel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+    gScaleLockControlsPanel.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.82];
+    gScaleLockControlsPanel.layer.cornerRadius = 12.0;
+    gScaleLockControlsPanel.hidden = YES;
+    [rootView addSubview:gScaleLockControlsPanel];
+
+    NSArray<NSString *> *titles = @[@"Delay an", @"Delay hien", @"Do mo", @"Animation mo"];
+    NSMutableArray<UILabel *> *titleLabels = [NSMutableArray array];
+    NSMutableArray<UILabel *> *valueLabels = [NSMutableArray array];
+    NSMutableArray<UISlider *> *sliders = [NSMutableArray array];
+
+    for (NSUInteger index = 0; index < titles.count; index++) {
+        CGFloat y = 14.0 + index * 55.0;
+        UILabel *title = overlayControlLabel(titles[index], 13.0, UIFontWeightSemibold);
+        title.frame = CGRectMake(14.0, y, 130.0, 20.0);
+        [gScaleLockControlsPanel addSubview:title];
+        [titleLabels addObject:title];
+
+        UILabel *value = overlayControlLabel(@"", 13.0, UIFontWeightRegular);
+        value.textAlignment = NSTextAlignmentRight;
+        value.frame = CGRectMake(gScaleLockControlsPanel.bounds.size.width - 104.0, y, 90.0, 20.0);
+        value.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+        [gScaleLockControlsPanel addSubview:value];
+        [valueLabels addObject:value];
+
+        UISlider *slider = [UISlider new];
+        slider.frame = CGRectMake(14.0, y + 22.0, gScaleLockControlsPanel.bounds.size.width - 28.0, 28.0);
+        slider.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+        [gScaleLockControlsPanel addSubview:slider];
+        [sliders addObject:slider];
+    }
+
+    gOverlayHideDelayValueLabel = valueLabels[0];
+    gOverlayShowDelayValueLabel = valueLabels[1];
+    gOverlayDimOpacityValueLabel = valueLabels[2];
+    gOverlayDimAnimationValueLabel = valueLabels[3];
+    gOverlayHideDelaySlider = sliders[0];
+    gOverlayShowDelaySlider = sliders[1];
+    gOverlayDimOpacitySlider = sliders[2];
+    gOverlayDimAnimationSlider = sliders[3];
+
+    gOverlayHideDelaySlider.minimumValue = 0;
+    gOverlayHideDelaySlider.maximumValue = 2000;
+    gOverlayShowDelaySlider.minimumValue = 0;
+    gOverlayShowDelaySlider.maximumValue = 2000;
+    gOverlayDimOpacitySlider.minimumValue = 0.0;
+    gOverlayDimOpacitySlider.maximumValue = 1.0;
+    gOverlayDimAnimationSlider.minimumValue = 0;
+    gOverlayDimAnimationSlider.maximumValue = 2000;
+
+    [gOverlayHideDelaySlider addTarget:gOverlayControlTarget action:@selector(hideDelayChanged:) forControlEvents:UIControlEventValueChanged];
+    [gOverlayShowDelaySlider addTarget:gOverlayControlTarget action:@selector(showDelayChanged:) forControlEvents:UIControlEventValueChanged];
+    [gOverlayDimOpacitySlider addTarget:gOverlayControlTarget action:@selector(dimOpacityChanged:) forControlEvents:UIControlEventValueChanged];
+    [gOverlayDimAnimationSlider addTarget:gOverlayControlTarget action:@selector(dimAnimationChanged:) forControlEvents:UIControlEventValueChanged];
+
+    gToggleClickButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    gToggleClickButton.frame = CGRectMake(14.0, panelHeight - 48.0, gScaleLockControlsPanel.bounds.size.width - 28.0, 36.0);
+    gToggleClickButton.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+    gToggleClickButton.backgroundColor = [UIColor colorWithRed:0.12 green:0.47 blue:1.0 alpha:0.95];
+    gToggleClickButton.layer.cornerRadius = 8.0;
+    gToggleClickButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    [gToggleClickButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [gToggleClickButton addTarget:gOverlayControlTarget action:@selector(toggleClickTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [gScaleLockControlsPanel addSubview:gToggleClickButton];
+
+    gHideImageButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    gHideImageButton.frame = CGRectMake(14.0, panelHeight - 92.0, gScaleLockControlsPanel.bounds.size.width - 28.0, 36.0);
+    gHideImageButton.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+    gHideImageButton.backgroundColor = [UIColor colorWithRed:0.95 green:0.22 blue:0.18 alpha:0.95];
+    gHideImageButton.layer.cornerRadius = 8.0;
+    gHideImageButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    [gHideImageButton setTitle:@"An anh" forState:UIControlStateNormal];
+    [gHideImageButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [gHideImageButton addTarget:gOverlayControlTarget action:@selector(hideImageTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [gScaleLockControlsPanel addSubview:gHideImageButton];
+
+    updateOverlayControlValues();
+    updateScaleLockControlsVisibility();
+}
+
+static UIImage *overlayImageFromPasteboard(void) {
+    UIPasteboard *pasteboard = overlayPasteboard(NO);
+    UIImage *image = pasteboard.image;
+    if (image) {
+        return image;
+    }
+
+    NSData *pngData = [pasteboard dataForPasteboardType:@"public.png"];
+    if (pngData.length) {
+        image = [UIImage imageWithData:pngData scale:UIScreen.mainScreen.scale];
+        if (image) {
+            return image;
         }
-        [self.imageView removeFromSuperview];
-        self.imageView = nil;
     }
-    
-    // Huỷ cửa sổ ảnh
-    if (self.imageWindow) {
-        self.imageWindow.targetImageView = nil;
-        self.imageWindow.rootViewController = nil;
-        self.imageWindow.hidden = YES;
-        self.imageWindow = nil;
+
+    NSData *jpegData = [pasteboard dataForPasteboardType:@"public.jpeg"];
+    if (jpegData.length) {
+        return [UIImage imageWithData:jpegData scale:UIScreen.mainScreen.scale];
     }
-    
-    // Giải phóng ảnh gốc
-    self.selectedImage = nil;
-    self.isImageVisible = NO;
-    self.targetImageVisible = NO;
-    
-    // Reset toggle switch
-    self.isToggleClickEnabled = NO;
-    self.toggleSwitch.on = NO;
-    [self saveSettings];
+
+    return nil;
+}
+
+static UIImage *overlayImageFromSharedFile(void) {
+    NSData *imageData = [NSData dataWithContentsOfFile:kOverlayImagePath];
+    if (!imageData.length) {
+        return nil;
+    }
+    return [UIImage imageWithData:imageData scale:UIScreen.mainScreen.scale];
+}
+
+static void showOverlayImage(UIImage *image) {
+    if (!image) {
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ensureOverlayWindow();
+        if (!gOverlayWindow) {
+            return;
+        }
+
+        if (!gOverlayImageView) {
+            gOverlayImageView = [[UIImageView alloc] initWithFrame:centeredFrameForImage(image)];
+            configureRawImageView(gOverlayImageView);
+            attachGestures(gOverlayImageView);
+            [gOverlayWindow.rootViewController.view addSubview:gOverlayImageView];
+        }
+        updateExpandedPinchGesture();
+        ensureScaleLockControls();
+
+        gOverlayImageView.image = rendersOverlayImage() ? image : nil;
+        if (CGRectIsEmpty(gOverlayImageView.frame) || gOverlayImageView.frame.size.width < 2 || gOverlayImageView.frame.size.height < 2) {
+            gOverlayImageView.frame = centeredFrameForImage(image);
+        }
+
+        gOverlayImageView.hidden = NO;
+        applyOverlayAlpha();
+        gOverlayVisible = YES;
+        applyOverlayStateFromDisk();
+        refreshOverlayWindowVisibility();
+        persistOverlayState(NO);
+        NSLog(@"[OverlayIOSTOOL] Overlay shown %.0fx%.0f", image.size.width, image.size.height);
+    });
+}
+
+static void loadAndShowPublishedOverlay(void) {
+    UIImage *image = overlayImageFromPasteboard();
+    if (!image) {
+        image = overlayImageFromSharedFile();
+    }
+
+    if (!image) {
+        NSLog(@"[OverlayIOSTOOL] No published image");
+        return;
+    }
+
+    showOverlayImage(image);
+}
+
+static void removeOverlay(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (gQuickActionsVisible) {
+            dismissOverlayQuickActions();
+        }
+        if (gScaleLockModeEnabled) {
+            applyScaleLockMode(NO);
+        }
+        gScaleLockModeEnabled = NO;
+        if (gOverlayImageView) {
+            [gOverlayImageView removeFromSuperview];
+            gOverlayImageView = nil;
+        }
+
+        if (gOverlayWindow) {
+            gOverlayWindow.hidden = YES;
+        }
+
+        gOverlayVisible = NO;
+        NSLog(@"[OverlayIOSTOOL] Overlay removed");
+    });
+}
+
+static void clearPublishedStorage(void) {
+    [UIPasteboard removePasteboardWithName:kOverlayPasteboardName];
+    [NSFileManager.defaultManager removeItemAtPath:kOverlayImagePath error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:kOverlayStatePath error:nil];
+}
+
+static void __attribute__((unused)) stopOverlayTool(void) {
+    clearPublishedStorage();
+    removeOverlay();
+}
+
+static void loadOverlaySettings(void) {
+    NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kOverlaySettingsPath];
+    gToggleClickEnabled = [settings[@"toggleClickEnabled"] boolValue];
+    gHideDelayMs = settings[@"hideDelayMs"] ? [settings[@"hideDelayMs"] integerValue] : 0;
+    gShowDelayMs = settings[@"showDelayMs"] ? [settings[@"showDelayMs"] integerValue] : 0;
+    gDimOpacity = settings[@"dimOpacity"] ? [settings[@"dimOpacity"] doubleValue] : 1.0;
+    gDimAnimationMs = settings[@"dimAnimationMs"] ? [settings[@"dimAnimationMs"] integerValue] : 0;
+    gHideDelayMs = MAX(0, MIN(gHideDelayMs, 10000));
+    gShowDelayMs = MAX(0, MIN(gShowDelayMs, 10000));
+    gDimAnimationMs = MAX(0, MIN(gDimAnimationMs, 10000));
+    gDimOpacity = MAX(0.0, MIN(gDimOpacity, 1.0));
+    if (!gToggleClickEnabled) {
+        gOverlayDimmed = NO;
+    }
+    applyOverlayAlpha();
+    updateOverlayControlValues();
+    NSLog(@"[OverlayIOSTOOL] Settings toggle=%@ hide=%ld show=%ld dim=%.2f anim=%ld", @(gToggleClickEnabled), (long)gHideDelayMs, (long)gShowDelayMs, gDimOpacity, (long)gDimAnimationMs);
+}
+
+static void applyOverlayVisibility(BOOL visible) {
+    if (!gOverlayImageView) {
+        return;
+    }
+
+    if (gScaleLockModeEnabled) {
+        return;
+    }
+
+    gOverlayVisible = visible;
+    if (!visible) {
+        gOverlayDimmed = NO;
+    }
+    applyOverlayAlpha();
+    gOverlayImageView.hidden = !visible;
+    refreshOverlayWindowVisibility();
+    persistOverlayState(YES);
+}
+
+static void applyOverlayDimmed(BOOL dimmed) {
+    if (!gOverlayImageView || !gOverlayVisible || gScaleLockModeEnabled) {
+        return;
+    }
+
+    gOverlayDimmed = dimmed;
+    gOverlayImageView.hidden = NO;
+    animateOverlayAlphaForCurrentDimState();
+    refreshOverlayWindowVisibility();
+    persistOverlayState(YES);
+}
+
+static void applyScaleLockMode(BOOL enabled) {
+    if (!gOverlayImageView) {
+        gScaleLockModeEnabled = NO;
+        return;
+    }
+
+    if (enabled && gQuickActionsVisible) {
+        dismissOverlayQuickActions();
+    }
+
+    gScaleLockModeEnabled = enabled;
+    gToggleGeneration++;
+
+    gImagePanGesture.enabled = !enabled;
+    gImagePinchGesture.enabled = !enabled;
+    gQuickActionsTapGesture.enabled = !enabled;
+
+    // Reset recognizer state when switching modes, which is important on older devices.
+    gExpandedPinchGesture.enabled = NO;
+    gExpandedPinchGesture.enabled = YES;
+    gRelativePanGesture.enabled = NO;
+    gRelativePanGesture.enabled = YES;
+    gInputBlockTapGesture.enabled = NO;
+    gInputBlockTapGesture.enabled = YES;
+
+    if (enabled) {
+        gOverlayVisible = YES;
+        gOverlayDimmed = NO;
+        gOverlayWindow.frame = UIScreen.mainScreen.bounds;
+        gOverlayWindow.windowLevel = overlayWindowLevel();
+        gOverlayWindow.userInteractionEnabled = YES;
+        gOverlayWindow.rootViewController.view.userInteractionEnabled = YES;
+        gOverlayWindow.hidden = NO;
+        if (!gOverlayWindow.isKeyWindow) {
+            gPreviousKeyWindow = currentKeyWindowExcludingOverlay();
+            [gOverlayWindow makeKeyAndVisible];
+        }
+        gOverlayImageView.hidden = NO;
+        applyOverlayAlpha();
+        gOverlayImageView.layer.borderWidth = rendersOverlayImage() ? 3.0 : 0.0;
+        gOverlayImageView.layer.borderColor = rendersOverlayImage() ? UIColor.systemBlueColor.CGColor : nil;
+    } else {
+        gOverlayWindow.windowLevel = overlayWindowLevel();
+        gOverlayImageView.layer.borderWidth = 0;
+        gOverlayImageView.layer.borderColor = nil;
+        [gOverlayWindow resignKeyWindow];
+        if (gPreviousKeyWindow) {
+            [gPreviousKeyWindow makeKeyWindow];
+        }
+        gPreviousKeyWindow = nil;
+    }
+
+    refreshOverlayWindowVisibility();
+    updateScaleLockControlsVisibility();
+    updateOverlayControlValues();
+    persistOverlayState(YES);
+    NSLog(@"[OverlayIOSTOOL] Scale lock mode %@", enabled ? @"ON" : @"OFF");
+}
+
+static void __attribute__((unused)) scheduleToggleOverlayVisibility(void) {
+    if (!gToggleClickEnabled || !gOverlayImageView) {
+        return;
+    }
+
+    BOOL targetDimmed = !gOverlayDimmed;
+    NSInteger delayMs = targetDimmed ? gHideDelayMs : gShowDelayMs;
+    NSUInteger generation = ++gToggleGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayMs * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+        if (generation != gToggleGeneration) {
+            return;
+        }
+        applyOverlayDimmed(targetDimmed);
+    });
+}
+
+static BOOL pointInsideOverlayImage(CGPoint pointInWindow) {
+    if (!gOverlayImageView || gOverlayImageView.hidden || !gOverlayVisible) {
+        return NO;
+    }
+
+    CGPoint point = [gOverlayImageView convertPoint:pointInWindow fromView:gOverlayWindow];
+    return [gOverlayImageView pointInside:point withEvent:nil];
+}
+
+static BOOL touchInsideOverlayImage(UITouch *touch) {
+    if (!touch || !gOverlayWindow || !gOverlayImageView) {
+        return NO;
+    }
+
+    UIWindow *sourceWindow = touch.window;
+    CGPoint sourcePoint = [touch locationInView:sourceWindow];
+    CGPoint overlayPoint = sourceWindow ? [gOverlayWindow convertPoint:sourcePoint fromWindow:sourceWindow] : [touch locationInView:gOverlayWindow];
+    return pointInsideOverlayImage(overlayPoint);
+}
+
+static void __attribute__((unused)) handleHiddenImageDoubleTapIfNeeded(UIEvent *event) {
+    if (gScaleLockModeEnabled || !gOverlayImageView || gOverlayVisible || event.type != UIEventTypeTouches) {
+        return;
+    }
+
+    for (UITouch *touch in event.allTouches) {
+        if (touch.phase != UITouchPhaseBegan || touch.tapCount < 2) {
+            continue;
+        }
+
+        applyOverlayVisibility(YES);
+        syncOverlayStateRealtime(YES);
+        return;
+    }
+}
+
+static void registerOverlayNotification(void) {
+    if (!gOverlayProcessEnabled || gNotifyToken != 0) {
+        return;
+    }
+
+    notify_register_dispatch(kOverlayUpdatedNotification, &gNotifyToken, dispatch_get_main_queue(), ^(__unused int token) {
+        NSLog(@"[OverlayIOSTOOL] Update notification received");
+        loadAndShowPublishedOverlay();
+    });
+
+    notify_register_dispatch(kOverlayRemoveNotification, &gRemoveToken, dispatch_get_main_queue(), ^(__unused int token) {
+        NSLog(@"[OverlayIOSTOOL] Remove notification received");
+        clearPublishedStorage();
+        removeOverlay();
+    });
+
+    notify_register_dispatch(kOverlaySettingsNotification, &gSettingsToken, dispatch_get_main_queue(), ^(__unused int token) {
+        loadOverlaySettings();
+    });
+
+    if (gIsSpringBoardProcess) {
+        notify_register_dispatch("com.apple.springboard.hasBlankedScreen", &gBlankedScreenToken, dispatch_get_main_queue(), ^(int token) {
+            uint64_t state = 0;
+            notify_get_state(token, &state);
+            gScreenBlanked = (state != 0);   // 1 = màn hình tắt
+            refreshOverlayWindowVisibility();
+        });
+
+        notify_register_dispatch("com.apple.springboard.lockstate", &gLockStateToken, dispatch_get_main_queue(), ^(int token) {
+            uint64_t state = 0;
+            notify_get_state(token, &state);
+            gScreenLocked = (state != 0);    // 1 = đã khoá
+            refreshOverlayWindowVisibility();
+        });
+    }
+
+    notify_register_dispatch(kOverlayStateNotification, &gStateToken, dispatch_get_main_queue(), ^(__unused int token) {
+        if (!gOverlayImageView) {
+            loadAndShowPublishedOverlay();
+            return;
+        }
+        applyOverlayStateFromDisk();
+    });
+}
+
+static void activateOverlayHost(void) {
+    if (!gOverlayProcessEnabled || !UIApplication.sharedApplication) {
+        return;
+    }
+
+    if (!gOverlayHostReady) {
+        gOverlayHostReady = YES;
+        loadOverlaySettings();
+        registerOverlayNotification();
+        startRealtimeServerIfNeeded();
+        NSLog(@"[OverlayIOSTOOL] Overlay host ready in %@", NSBundle.mainBundle.bundleIdentifier ?: NSProcessInfo.processInfo.processName);
+    }
+
+    if (!gIsSpringBoardProcess && ![NSFileManager.defaultManager fileExistsAtPath:kOverlayImagePath] && !overlayPasteboard(NO).image) {
+        return;
+    }
+
+    if (!gIsSpringBoardProcess) {
+        loadAndShowPublishedOverlay();
+    }
+}
+
+@implementation OverlayGestureHandler
+
+- (void)handlePan:(UIPanGestureRecognizer *)gesture {
+    UIView *view = gesture.view;
+    if (!view || gScaleLockModeEnabled) {
+        return;
+    }
+
+    CGPoint translation = [gesture translationInView:view.superview];
+    view.center = CGPointMake(view.center.x + translation.x, view.center.y + translation.y);
+    [gesture setTranslation:CGPointZero inView:view.superview];
+    BOOL finished = (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled);
+    syncOverlayStateRealtime(finished);
+}
+
+- (void)handlePinch:(UIPinchGestureRecognizer *)gesture {
+    UIView *view = gesture.view;
+    if (!view || gScaleLockModeEnabled) {
+        return;
+    }
+
+    CGFloat scale = gesture.scale;
+    CGSize newSize = CGSizeMake(view.bounds.size.width * scale, view.bounds.size.height * scale);
+    if (newSize.width >= 24 && newSize.height >= 24) {
+        view.bounds = CGRectMake(0, 0, newSize.width, newSize.height);
+    }
+    gesture.scale = 1.0;
+    BOOL finished = (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled);
+    syncOverlayStateRealtime(finished);
+}
+
+- (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        applyScaleLockMode(!gScaleLockModeEnabled);
+    }
+}
+
+- (void)handleQuickActionsTap:(UITapGestureRecognizer *)gesture {
+    if (gesture.state == UIGestureRecognizerStateRecognized && !gScaleLockModeEnabled) {
+        showOverlayQuickActions();
+    }
+}
+
+- (void)handleQuickActionsBackgroundButton:(__unused UIControl *)control {
+    dismissOverlayQuickActions();
+}
+
+- (void)handleQuickActionsCancelButton:(__unused UIButton *)button {
+    dismissOverlayQuickActions();
+}
+
+- (void)handleQuickActionsDepositButton:(__unused UIButton *)button {
+    finishOverlayQuickActions();
+    notify_post(kOverlayDepositActionNotification);
+}
+
+- (void)handleQuickActionsWithdrawButton:(__unused UIButton *)button {
+    finishOverlayQuickActions();
+    notify_post(kOverlayWithdrawActionNotification);
+}
+
+- (void)handleExpandedPinch:(UIPinchGestureRecognizer *)gesture {
+    if (!gOverlayImageView) {
+        return;
+    }
+
+    if (gesture.state == UIGestureRecognizerStateEnded ||
+        gesture.state == UIGestureRecognizerStateCancelled ||
+        gesture.state == UIGestureRecognizerStateFailed) {
+        gesture.scale = 1.0;
+        syncOverlayStateRealtime(YES);
+        return;
+    }
+
+    if (gesture.numberOfTouches < 2) {
+        gesture.scale = 1.0;
+        return;
+    }
+
+    UIView *rootView = gOverlayWindow.rootViewController.view;
+    if (!gScaleLockModeEnabled) {
+        CGPoint firstPoint = [gesture locationOfTouch:0 inView:rootView];
+        CGPoint secondPoint = [gesture locationOfTouch:1 inView:rootView];
+        CGRect hitbox = expandedScaleHitboxInRootView();
+        if (!CGRectContainsPoint(hitbox, firstPoint) || !CGRectContainsPoint(hitbox, secondPoint)) {
+            gesture.scale = 1.0;
+            return;
+        }
+    }
+
+    CGFloat scale = MAX(0.5, MIN(gesture.scale, 2.0));
+    CGSize newSize = CGSizeMake(gOverlayImageView.bounds.size.width * scale, gOverlayImageView.bounds.size.height * scale);
+    CGFloat maxDimension = MAX(UIScreen.mainScreen.bounds.size.width, UIScreen.mainScreen.bounds.size.height) * 20.0;
+    if (newSize.width >= 12 && newSize.height >= 12 &&
+        newSize.width <= maxDimension && newSize.height <= maxDimension) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        gOverlayImageView.bounds = CGRectMake(0, 0, newSize.width, newSize.height);
+        [CATransaction commit];
+    }
+    gesture.scale = 1.0;
+    syncOverlayStateRealtime(NO);
+}
+
+- (void)handleRelativePan:(UIPanGestureRecognizer *)gesture {
+    if (!gScaleLockModeEnabled || !gOverlayImageView) {
+        [gesture setTranslation:CGPointZero inView:gOverlayWindow.rootViewController.view];
+        return;
+    }
+
+    UIView *rootView = gOverlayWindow.rootViewController.view;
+    if (gesture.state == UIGestureRecognizerStateEnded ||
+        gesture.state == UIGestureRecognizerStateCancelled ||
+        gesture.state == UIGestureRecognizerStateFailed) {
+        [gesture setTranslation:CGPointZero inView:rootView];
+        syncOverlayStateRealtime(YES);
+        return;
+    }
+
+    CGPoint translation = [gesture translationInView:rootView];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    gOverlayImageView.center = CGPointMake(gOverlayImageView.center.x + translation.x, gOverlayImageView.center.y + translation.y);
+    [CATransaction commit];
+    [gesture setTranslation:CGPointZero inView:rootView];
+    syncOverlayStateRealtime(NO);
+}
+
+- (void)handleBlockedTap:(UITapGestureRecognizer *)gesture {
+    // Intentionally consume taps while scale-lock mode routes the whole screen to the overlay window.
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if (gQuickActionsVisible) {
+        return NO;
+    }
+
+    if (gScaleLockModeEnabled && gOverlayWindow) {
+        CGPoint point = [touch locationInView:gOverlayWindow];
+        if (pointInsideScaleLockControls(point)) {
+            return NO;
+        }
+    }
+    if (gestureRecognizer == gImagePanGesture || gestureRecognizer == gImagePinchGesture) {
+        return !gScaleLockModeEnabled;
+    }
+    if (gestureRecognizer == gQuickActionsTapGesture) {
+        return !gScaleLockModeEnabled;
+    }
+    if (gestureRecognizer == gExpandedPinchGesture) {
+        if (gScaleLockModeEnabled) {
+            return YES;
+        }
+        return !gOverlayImageView || ![touch.view isDescendantOfView:gOverlayImageView];
+    }
+    if (gestureRecognizer == gInputBlockTapGesture) {
+        return gScaleLockModeEnabled;
+    }
+    if (gestureRecognizer == gRelativePanGesture) {
+        return gScaleLockModeEnabled;
+    }
+    return YES;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
+    if (gestureRecognizer == gInputBlockTapGesture || otherGestureRecognizer == gInputBlockTapGesture) {
+        return NO;
+    }
+    return YES;
 }
 
 @end
 
-// ============================================================================
-// Hooks hệ thống — Chỉ chạy trong process SpringBoard
-// ============================================================================
-static OverlayWindow *overlayWindow = nil;
+%group OverlayUIApplicationHooks
 
-%hook SpringBoard
-
-- (void)applicationDidFinishLaunching:(id)application {
-    %orig;
-    
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!overlayWindow) {
-            overlayWindow = [[OverlayWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-            
-            UIViewController *rootVC = [[UIViewController alloc] init];
-            rootVC.view.backgroundColor = [UIColor clearColor];
-            overlayWindow.rootViewController = rootVC;
-            
-            // [Fix Bug #9] KHÔNG gọi makeKeyAndVisible trên OverlayWindow
-            // Chỉ hiện window mà không cướp key status khỏi SpringBoard
-            overlayWindow.hidden = NO;
-        }
-    });
-}
-
-%end
-
-// ============================================================================
-// Hook bắt sự kiện chạm — Chạy trong MỌI process có UIKit
-// [Fix Bug #12] Guard: Bỏ qua nếu đang chạy trong SpringBoard process
-// vì SpringBoard đã có observer nhận notification riêng
-// ============================================================================
 %hook UIApplication
 
 - (void)sendEvent:(UIEvent *)event {
-    %orig;
-    
-    // Chỉ gửi notification khi KHÔNG phải SpringBoard
-    // Trong SpringBoard, touch trên home screen sẽ do observer tự xử lý
-    // Nếu không guard, sẽ bị double-toggle (ẩn rồi hiện ngay)
-    static NSString *bundleID = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        bundleID = [[NSBundle mainBundle] bundleIdentifier];
-    });
-    
-    if ([bundleID isEqualToString:@"com.apple.springboard"]) {
+    if (!gOverlayProcessEnabled) {
+        %orig(event);
         return;
     }
-    
-    NSSet *allTouches = [event allTouches];
-    for (UITouch *touch in allTouches) {
-        if (touch.phase == UITouchPhaseBegan) {
-            UIWindow *window = touch.window;
-            if (window) {
-                NSString *windowClass = NSStringFromClass([window class]);
-                
-                // Bỏ qua các sự kiện chạm xảy ra trong giao diện của chính Tool
-                if ([windowClass isEqualToString:@"OverlayWindow"] || [windowClass isEqualToString:@"ImageWindow"]) {
-                    return;
-                }
+
+    BOOL quickActionsWereVisible = gQuickActionsVisible;
+
+    if (event.type == UIEventTypeTouches && gScaleLockModeEnabled && gOverlayImageView) {
+        BOOL overlayTouch = NO;
+        for (UITouch *touch in event.allTouches) {
+            UIWindow *touchWindow = touch.window;
+            if (touchWindow == gOverlayWindow || [touch.view isDescendantOfView:gOverlayWindow]) {
+                overlayTouch = YES;
+                break;
             }
-            
-            // Gửi thông báo Darwin cho SpringBoard khi phát hiện chạm ở ngoài tool
-            notify_post("com.vietanh.overlayiostool.touch_detected");
-            break;
         }
+
+        if (!overlayTouch) {
+            return;
+        }
+
+        %orig(event);
+        return;
+    }
+
+    %orig(event);
+
+    if (quickActionsWereVisible || gQuickActionsVisible) {
+        return;
+    }
+
+    handleHiddenImageDoubleTapIfNeeded(event);
+
+    if (gScaleLockModeEnabled || !gToggleClickEnabled || !gOverlayImageView || event.type != UIEventTypeTouches) {
+        return;
+    }
+
+    BOOL hasOutsideBeganTouch = NO;
+    for (UITouch *touch in event.allTouches) {
+        if (touch.phase != UITouchPhaseBegan) {
+            continue;
+        }
+
+        if (touchInsideOverlayImage(touch)) {
+            return;
+        }
+
+        hasOutsideBeganTouch = YES;
+    }
+
+    if (hasOutsideBeganTouch) {
+        scheduleToggleOverlayVisibility();
     }
 }
 
 %end
+
+%end
+
+%ctor {
+    @autoreleasepool {
+        NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
+        gIsSpringBoardProcess = [bundleIdentifier isEqualToString:@"com.apple.springboard"];
+        if (gIsSpringBoardProcess && springBoardCrashGuardShouldDisable()) {
+            return;
+        }
+        gOverlayProcessEnabled = shouldEnableOverlayInCurrentProcess();
+        if (!gOverlayProcessEnabled) {
+            return;
+        }
+
+        %init(OverlayUIApplicationHooks);
+
+        NSLog(@"[OverlayIOSTOOL] Loaded in %@", NSBundle.mainBundle.bundleIdentifier ?: NSProcessInfo.processInfo.processName);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (gObserversInstalled) {
+                return;
+            }
+            gObserversInstalled = YES;
+
+            [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                              object:nil
+                                                               queue:NSOperationQueue.mainQueue
+                                                          usingBlock:^(__unused NSNotification *notification) {
+                activateOverlayHost();
+            }];
+            if (gIsSpringBoardProcess) {
+                [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationProtectedDataWillBecomeUnavailable
+                                                                  object:nil
+                                                                   queue:NSOperationQueue.mainQueue
+                                                              usingBlock:^(__unused NSNotification *notification) {
+                    gDataUnavailable = YES;          // khoá máy -> chỉ ẩn, giữ ảnh
+                    refreshOverlayWindowVisibility();
+                }];
+                [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationProtectedDataDidBecomeAvailable
+                                                                  object:nil
+                                                                   queue:NSOperationQueue.mainQueue
+                                                              usingBlock:^(__unused NSNotification *notification) {
+                    gDataUnavailable = NO;           // mở khoá -> hiện lại
+                    refreshOverlayWindowVisibility();
+                }];
+            }
+        });
+        if (gIsSpringBoardProcess) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                activateOverlayHost();
+            });
+        }
+    }
+}

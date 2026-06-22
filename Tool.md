@@ -1,61 +1,259 @@
-# Hướng dẫn Phát triển & Biên dịch iOS Overlay Tweak (iOS 15+)
+# OverlayIOSTOOL v2.0 - Snapper2-style Image Overlay Tweak
 
-Dự án này là một iOS Jailbreak Tweak hoàn chỉnh chạy trên **iOS 15+** được xây dựng bằng **Theos** (Objective-C/Logos). Tweak cho phép người dùng chọn một ảnh từ thư viện, hiển thị lớp phủ (overlay) luôn nổi trên tất cả ứng dụng khác, hỗ trợ zoom/kéo thả mượt mà, chế độ ẩn/hiện đan xen trễ khi chạm màn hình và cơ chế giải phóng RAM hoàn toàn.
+Một iOS Jailbreak Tweak hoàn chỉnh cho **iOS 15+** được xây dựng bằng **Theos**, cung cấp khả năng hiển thị hình ảnh trên tất cả các ứng dụng như Snapper2 nhưng với tính năng điều khiển qua ứng dụng companion đơn giản.
 
----
+## 🎯 Tính Năng Chính
 
-## 📂 Danh sách các file trong dự án
+### 1. **Hiển Thị Ảnh Overlay (Snapper2-style)**
+- Chọn ảnh từ thư viện Photos
+- Hiển thị ảnh gốc mà không có nền hoặc bóng đổ
+- Tự động cấp quyền thông qua PHPickerViewController
+- Hỗ trợ PNG, JPG với channel alpha (trong suốt)
 
-1. **[Tweak.x](file:///e:/OverlayIOSTOOL/Tweak.x):** Mã nguồn Logos chứa toàn bộ logic ứng dụng:
-   - Hook `SpringBoard` để tạo giao diện menu điều khiển.
-   - Hook `UIApplication` trong tất cả các ứng dụng để bắt sự kiện chạm màn hình toàn hệ thống.
-   - Định nghĩa `ImageWindow` (chạm xuyên qua phần trống) và `OverlayWindow`.
-2. **[Makefile](file:///e:/OverlayIOSTOOL/Makefile):** Cấu hình biên dịch Theos (liên kết các framework `UIKit`, `PhotosUI`, và `Photos`).
-3. **[control](file:///e:/OverlayIOSTOOL/control):** Thông tin mô tả gói cài đặt `.deb`.
-4. **[OverlayIOSTOOL.plist](file:///e:/OverlayIOSTOOL/OverlayIOSTOOL.plist):** Khai báo filter `com.apple.UIKit` để nạp tweak vào mọi ứng dụng nhằm theo dõi sự kiện chạm toàn màn hình.
+### 2. **Gesture Controls**
+- **Drag (Kéo)**: Di chuyển ảnh tự do trên màn hình
+- **Pinch (Nhéo)**: Phóng to/thu nhỏ ảnh mượt mà (0.1x - 10x)
+- **Touch Outside**: Toggle ẩn/hiện đan xen với delay
 
----
+### 3. **Drawing & Annotation (Snapper2-like)**
+- ✏️ **Công Cụ Vẽ**: Bật/tắt chế độ vẽ lên overlay
+- 🎨 **Màu Sắc Tùy Chỉnh**: Chọn từ 8 màu cơ bản (Đỏ, Xanh, Lá cây, v.v.)
+- 🖍️ **Độ Dày Nét Vẽ**: Điều chỉnh từ 1px - 20px
+- 🗑️ **Xóa Bản Vẽ**: Xóa tất cả annotation chỉ bằng 1 cú nhấn
 
-## 🚀 Các tính năng chi tiết & Cơ chế lập trình
+### 4. **Tính Năng Khác**
+- ⚡ **Bật/Tắt Overlay**: Toggle nhanh các lúc
+- 👆 **Toggle Click Mode**: Tự động ẩn/hiện khi chạm bên ngoài ảnh
+- 🕐 **Điều Chỉnh Delay**: Tùy chỉnh độ trễ ẩn/hiện (0-2000ms)
+- 🔄 **Khôi Phục Vị Trí**: Đặt lại ảnh về giữa màn hình
+- 🗑️ **Xóa Hoàn Toàn & Giải Phóng RAM**: Tắt tweak sạch sẽ
 
-### 1. Chọn ảnh bằng `PHPickerViewController` (Không cần cấp quyền)
-- Trên iOS 15+, `PHPickerViewController` là bộ chọn ảnh hiện đại chạy ngoài tiến trình (out-of-process).
-- Không yêu cầu khai báo quyền truy cập ảnh trong file cấu hình SpringBoard (tránh bị crash hay lỗi bảo mật sandbox).
-- Khi chọn ảnh mới: Tweak sẽ tự động giải phóng đối tượng ảnh cũ khỏi bộ nhớ RAM và thiết lập ảnh mới ở độ phân giải gốc của ảnh.
+## 📂 Cấu Trúc File
 
-### 2. Lớp phủ ảnh gốc (Không nền, không bóng đổ)
-- Lớp phủ sử dụng một đối tượng `UIImageView` đặt trong `ImageWindow` riêng biệt.
-- Cửa sổ có mức độ ưu tiên hiển thị (`windowLevel`) rất cao để đè lên các ứng dụng khác, nhưng nằm dưới cửa sổ menu cấu hình.
-- Nền và ảnh không có bất kỳ hiệu ứng bóng đổ hay viền nền nào, hiển thị đúng định dạng trong suốt (Alpha channel) của ảnh gốc (ví dụ: ảnh PNG).
-- Gắn cử chỉ `UIPanGestureRecognizer` (kéo thả) và `UIPinchGestureRecognizer` (phóng to/thu nhỏ) cùng lúc nhờ cài đặt protocol `shouldRecognizeSimultaneouslyWithGestureRecognizer:`.
-
-### 3. Khôi phục ảnh gốc (Recovery Mechanism)
-- Khi lỡ kéo ảnh ra ngoài màn hình hoặc phóng quá nhỏ, người dùng chỉ cần nhấn **"🔄 Khôi phục ảnh gốc"** trong menu điều khiển hoặc chọn lại ảnh, tweak sẽ khôi phục ảnh về kích thước chuẩn và căn giữa màn hình ngay lập tức.
-
-### 4. Chế độ ẩn/hiện tự động đan xen trễ (Delayed Toggle Click)
-- Khi bật tính năng này, bất kỳ cú chạm nào bên ngoài vùng ảnh (ở bất kỳ app nào như Safari, Facebook, Game) sẽ làm ảnh tự động ẩn/hiện đan xen.
-- **Cơ chế IPC qua Darwin Notification:** Khi người dùng chạm màn hình trong bất kỳ ứng dụng nào, hàm hook `-[UIApplication sendEvent:]` của app đó sẽ phát hiện và phát ra một thông báo hệ thống `com.vietanh.overlayiostool.touch_detected`. SpringBoard nhận thông báo này và xử lý logic ẩn/hiện.
-- **Tránh tự động ẩn khi thao tác trên ảnh:** Nếu điểm chạm nằm trong vùng hitbox của ảnh (`ImageWindow` trả về `YES`), tweak sẽ chặn không phát thông báo, giúp người dùng thoải mái zoom/kéo ảnh mà không bị ẩn đi.
-- **Thời gian trễ (Delay):** Tích hợp hai thanh trượt điều khiển thời gian trễ cho cả hành động Ẩn và Hiện (từ 0 đến 2000 ms). Tweak sử dụng `performSelector:withObject:afterDelay:` để hẹn giờ thực thi và tự động huỷ lịch cũ khi có thao tác mới nhằm tránh xung đột.
-
-### 5. Tắt hoàn toàn & Giải phóng RAM
-- Khi bấm nút **"🔴 Tắt hoàn toàn & Giải phóng RAM"**, tweak sẽ gỡ bỏ cửa sổ ảnh, huỷ các cử chỉ, xoá đối tượng ảnh khỏi bộ nhớ đệm và tắt chế độ trễ chạm để trả lại RAM sạch hoàn toàn cho hệ thống.
-
----
-
-## ⚙️ Hướng dẫn Biên dịch & Cài đặt
-
-Mở Terminal tại thư mục gốc của dự án (`e:\OverlayIOSTOOL`):
-
-### 1. Biên dịch tweak
-```bash
-make package
+```
+OverlayIOSTOOL/
+├── Tweak.x                    # Mã nguồn Logos (tweak chính)
+├── App/
+│   ├── ViewController.m       # Giao diện ứng dụng companion
+│   ├── ViewController.h       # Header
+│   ├── AppDelegate.m          # App initialization
+│   └── main.m                 # Entry point
+├── Resources/
+│   └── Info.plist            # App metadata
+├── OverlayIOSTOOL.plist      # Tweak filter (UIKit)
+├── control                    # Debian package info
+├── Makefile                   # Theos build config
+├── build.ps1                  # Windows build script (PowerShell)
+├── build_and_install.sh       # macOS/Linux build script
+└── Tool.md                    # Tài liệu này
 ```
 
-### 2. Cài đặt lên điện thoại
-Thiết lập địa chỉ IP của iPhone đã jailbreak (cùng mạng Wi-Fi và có cài `OpenSSH`):
+## 🏗️ Kiến Trúc Theos
+
+### Tweak Structure (Tweak.x)
+1. **OverlayImageWindow**: Cửa sổ custom để hiển thị ảnh, chỉ nhận touch khi chạm vào ảnh (pass-through cho app bên dưới)
+2. **DrawingView**: View để vẽ annotation trên top của ảnh
+3. **OverlayGestureHandler**: Xử lý Pan & Pinch gesture đồng thời
+4. **Darwin Notifications**: IPC giữa app, tweak, và SpringBoard
+
+### IPC via Darwin Notifications
+
+| Notification | Mục Đích |
+|---|---|
+| `com.vietanh.overlayiostool.updated` | Load settings từ file, update overlay |
+| `com.vietanh.overlayiostool.remove` | Xóa overlay hoàn toàn |
+| `com.vietanh.overlayiostool.toggle` | Toggle ẩn/hiện ảnh |
+| `com.vietanh.overlayiostool.clear_drawing` | Xóa bản vẽ |
+
+### Companion App (OverlayToolApp)
+- UIKitNavigationController UI (iOS 15+)
+- Chọn ảnh: `PHPickerViewController` (không cần quyền cụ thể)
+- Lưu settings: `~/Documents/settings.plist`
+- Lưu ảnh: `~/Documents/overlay.png`
+
+## ⚙️ Hướng Dẫn Biên Dịch & Cài Đặt
+
+### Yêu Cầu
+- **macOS hoặc Linux hoặc Windows** với WSL/Cygwin
+- **Theos** được cài đặt (https://github.com/theos/theos)
+- **Xcode Command Line Tools** (macOS)
+- **iPhone** đã jailbreak với **Dopamine**
+- **OpenSSH** cài trên iPhone (để SSH access)
+
+### Bước 1: Cài Đặt Theos (Nếu Chưa Có)
+
+#### macOS/Linux:
 ```bash
-export THEOS_DEVICE_IP=192.168.1.X
+git clone --recursive https://github.com/theos/theos.git ~/theos
+export THEOS=~/theos
+```
+
+#### Windows (với WSL):
+```bash
+# Trong WSL
+git clone --recursive https://github.com/theos/theos.git ~/theos
+echo 'export THEOS=~/theos' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Bước 2: Setup Device IP
+
+```bash
+# Terminal
+export THEOS_DEVICE_IP=192.168.1.X    # Thay X bằng IP iPhone
+export THEOS_DEVICE_PORT=22
+export THEOS_DEVICE_USERNAME=root
+export THEOS_DEVICE_PASSWORD=alpine   # Mật khẩu SSH mặc định
+```
+
+### Bước 3: Build & Install
+
+#### macOS/Linux:
+```bash
+cd /path/to/OverlayIOSTOOL
+./build_and_install.sh
+```
+
+#### Windows (PowerShell):
+```powershell
+cd C:\path\to\OverlayIOSTOOL
+$env:THEOS = "C:\theos"
+$env:THEOS_DEVICE_IP = "192.168.1.X"
+.\build.ps1
+```
+
+#### Manual (mọi OS):
+```bash
+make package FINALPACKAGE=1
 make install
 ```
-Nhập mật khẩu SSH (mặc định là `alpine`), thiết bị sẽ tự động respring và tweak sẽ được kích hoạt.
+
+## 📱 Cách Sử Dụng
+
+### Trên iPhone
+
+1. **Mở OverlayToolApp** từ Home Screen
+2. **Chọn ảnh** → Nhấn "Chọn Ảnh Từ Thư Viện"
+3. **Bật Overlay** → Toggle "⚡ Bật Overlay"
+4. **Điều Chỉnh**:
+   - 👆 Bật "Toggle Click" để ẩn/hiện tự động
+   - 🕐 Điều chỉnh delay ẩn/hiện
+   - ✏️ Bật "Công Cụ Vẽ" để vẽ annotation
+   - 🎨 Chọn màu sắc
+   - 🖍️ Điều chỉnh độ dày nét
+5. **Xử Dụng**:
+   - Kéo ảnh: Drag với 1 ngón tay
+   - Zoom: Pinch với 2 ngón tay
+   - Ẩn/Hiện: Chạm bất kỳ nơi nào ngoài ảnh (nếu bật Toggle)
+   - Vẽ: Chạm vào ảnh để vẽ (nếu bật Công Cụ Vẽ)
+
+### Trên Jailbreak
+
+Overlay sẽ **luôn nổi** trên tất cả các ứng dụng:
+- Safari, Facebook, Instagram, TikTok, v.v. đều thấy ảnh overlay
+- Không ảnh hưởng performance
+- Tắt trong app companion hoặc từ Settings > Tweaks
+
+## 🔧 Dopamine Compatibility
+
+### Cấu Hình Cho Dopamine (Rootless)
+
+1. **THEOS_PACKAGE_SCHEME = rootless** ✓ (Đã set trong Makefile)
+2. **Target iOS**: 15.0+ (hỗ trợ rootless)
+3. **Frameworks**: UIKit, CoreGraphics, QuartzCore, AVFoundation
+4. **Bundle ID**: `com.vietanh.overlayiostool`
+
+### Kiểm Tra Cài Đặt
+
+```bash
+# SSH vào iPhone
+ssh root@192.168.1.X
+
+# Kiểm tra tweak
+ls -la /Library/MobileSubstrate/DynamicLibraries/ | grep -i overlay
+
+# Kiểm tra app
+ls -la /Applications/ | grep -i overlay
+
+# Xem logs
+tail -f /var/log/syslog
+```
+
+## ⚠️ Troubleshooting
+
+### Build Error: "THEOS not found"
+```bash
+export THEOS=/path/to/theos
+# Hoặc thêm vào ~/.bashrc / ~/.zshrc
+```
+
+### Device Connection Failed
+```bash
+# Kiểm tra IP
+ping 192.168.1.X
+
+# Test SSH
+ssh -v root@192.168.1.X
+
+# Đặt lại mật khẩu SSH
+# Trên iPhone: Settings > SSH > Reset Password
+```
+
+### Tweak Not Loaded
+```bash
+# Kiểm tra filter
+cat /Library/MobileSubstrate/DynamicLibraries/OverlayIOSTOOL.plist
+
+# Restart SpringBoard
+killall SpringBoard
+
+# Hoặc respring từ app companion
+```
+
+### App Không Launch
+```bash
+# Kiểm tra quyền
+chmod 755 /Applications/OverlayToolApp.app
+
+# Rebuild app
+make package FINALPACKAGE=1 && make install
+```
+
+## 🔒 Quyền & Privacy
+
+- ✓ **Không cần Photo Library permission** (dùng PHPickerViewController)
+- ✓ **Không cần Network** (toàn bộ local)
+- ✓ **Không ghi dữ liệu ra ngoài** (chỉ ~/Documents/)
+- ✓ **Rootless-safe** (Dopamine 2.x+)
+
+## 📝 Notes
+
+- Ảnh được lưu dưới dạng **PNG full resolution** trong `~/Documents/overlay.png`
+- Settings lưu trong `~/Documents/settings.plist`
+- Overlay window **luôn chạy trong SpringBoard** (không flicker khi chuyển app)
+- Drawing layer **render real-time** trên top của image
+- Xóa bản vẽ không xóa ảnh gốc
+
+## 🚀 Sắp Tới
+
+- [ ] Screenshot capture from SpringBoard
+- [ ] Multiple image layers
+- [ ] Shape tools (rectangle, circle, arrow)
+- [ ] Undo/Redo for drawing
+- [ ] Export drawn image
+- [ ] Custom color picker
+
+## 📧 Support
+
+Nếu gặp issue, vui lòng:
+1. Kiểm tra logs: `tail -f /var/log/syslog | grep -i overlay`
+2. Rebuild tweak: `make clean && make package FINALPACKAGE=1`
+3. Reinstall: `make install`
+
+---
+
+**Version**: 2.0.0  
+**Last Updated**: 2024  
+**Author**: Viet Anh  
+**License**: MIT  
+**Jailbreak**: Dopamine 2.x+ (rootless iOS 15+)

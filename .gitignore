@@ -1,0 +1,14 @@
+# Theos build artifacts
+.theos/
+packages/
+*.deb
+
+# Old packaging output
+dist/
+
+# fakeroot / build temp
+.fakeroot*
+.theos/_/
+
+# Offline build environment bundle (nặng vài trăm MB - không đưa vào git)
+buildenv/

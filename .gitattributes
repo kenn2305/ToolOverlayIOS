@@ -1,0 +1,22 @@
+# Linux/WSL doc nhung file nay -> BAT BUOC giu LF (CRLF se lam bash/make/dpkg loi)
+*.sh        text eol=lf
+*.x         text eol=lf
+*.m         text eol=lf
+*.h         text eol=lf
+*.plist     text eol=lf
+*.mk        text eol=lf
+Makefile    text eol=lf
+control     text eol=lf
+postinst    text eol=lf
+preinst     text eol=lf
+prerm       text eol=lf
+postrm      text eol=lf
+
+# Windows chay -> giu CRLF
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# Nhi phan - khong dung cham
+*.tar.gz    binary
+*.deb       binary
+*.png       binary

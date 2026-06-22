@@ -1,9 +1,9 @@
 Package: com.vietanh.overlayiostool
 Name: OverlayIOSTOOL
-Depends: mobilesubstrate
-Version: 0.0.1
+Depends: mobilesubstrate, firmware (>= 15.0), firmware (<< 17.0)
+Version: 5.8.0
 Architecture: iphoneos-arm64
-Description: An iOS tweak that displays an interactive floating overlay window.
+Description: Stable rootless iOS 15-16 overlay for A12 and newer devices.
 Maintainer: Viet Anh
 Author: Viet Anh
 Section: Tweaks
