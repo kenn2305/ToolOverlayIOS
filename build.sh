@@ -165,7 +165,10 @@ MISS="$(ldd "$CLANG_BIN" 2>/dev/null | awk '/not found/{print $1}')"
 if [ -n "$MISS" ]; then
     log "Toolchain thiếu thư viện:$MISS — đang cài/đối chiếu..."
     export DEBIAN_FRONTEND=noninteractive
-    apt-get install -y -qq libz3-4 z3 libncurses6 libtinfo6 zlib1g libxml2 >/dev/null 2>&1 || true
+    apt-get update -qq >/dev/null 2>&1 || true
+    for p in libz3-4 z3 libncurses6 libncursesw6 libtinfo6 zlib1g libxml2t64 libxml2; do
+        apt-get install -y -qq "$p" >/dev/null 2>&1 || true
+    done
     for lib in $MISS; do
         ldconfig -p | grep -q "$lib" && continue
         base="${lib%%.so*}"

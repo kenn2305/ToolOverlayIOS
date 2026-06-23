@@ -84,7 +84,11 @@ ensure_toolchain_libs() {
     [ -z "$miss" ] && return 0
     log "Toolchain thiếu thư viện:$miss — đang cài/đối chiếu..."
     export DEBIAN_FRONTEND=noninteractive
-    apt-get install -y -qq libz3-4 z3 libncurses6 libtinfo6 zlib1g libxml2 >/dev/null 2>&1 || true
+    apt-get update -qq >/dev/null 2>&1 || true
+    # Cài TỪNG gói riêng: 1 tên không có (khác bản Ubuntu) sẽ không chặn các gói khác.
+    for p in libz3-4 z3 libncurses6 libncursesw6 libtinfo6 zlib1g libxml2t64 libxml2; do
+        apt-get install -y -qq "$p" >/dev/null 2>&1 || true
+    done
     for lib in $miss; do
         ldconfig -p | grep -q "$lib" && continue
         local base cand
