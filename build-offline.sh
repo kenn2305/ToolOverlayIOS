@@ -45,12 +45,26 @@ fi
 [ -f "$THEOS_DIR/makefiles/common.mk" ] || die "Giải nén thất bại: không thấy Theos trong bundle."
 ok "Theos sẵn sàng"
 
-# 3. Cài các gói apt từ bundle (offline) — fakeroot, dpkg-dev...
+# 3. Cài công cụ build. Ưu tiên gói trong bundle (offline). Nếu bản Ubuntu khác
+#    (vd 24.04) khiến gói bundle không khớp -> tự cài bù qua apt (cần mạng).
 if ls "$BUILDER_HOME"/apt-debs/*.deb >/dev/null 2>&1; then
-    log "Cài gói apt offline..."
+    log "Cài gói apt từ bundle (offline)..."
     dpkg -i "$BUILDER_HOME"/apt-debs/*.deb >/dev/null 2>&1 || true
 fi
-command -v fakeroot >/dev/null 2>&1 || die "Thiếu 'fakeroot' (không có trong bundle). Cần cài thủ công: apt-get install fakeroot"
+
+NEED=""
+for t in fakeroot make perl rsync; do
+    command -v "$t" >/dev/null 2>&1 || NEED="$NEED $t"
+done
+if [ -n "$NEED" ]; then
+    log "Thiếu:$NEED — thử cài qua apt (cần mạng cho bước này)..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq >/dev/null 2>&1 || true
+    apt-get install -y -qq $NEED >/dev/null 2>&1 || true
+fi
+
+command -v fakeroot >/dev/null 2>&1 || die "Thiếu 'fakeroot' và không cài được qua apt. Hãy chạy: sudo apt-get install -y fakeroot make"
+command -v make >/dev/null 2>&1 || die "Thiếu 'make'. Hãy chạy: sudo apt-get install -y make"
 ok "công cụ build sẵn sàng"
 
 # 4. Xác minh toolchain THẬT (chống bundle hỏng)
