@@ -75,6 +75,32 @@ ls "$THEOS_DIR"/sdks/iPhoneOS*.sdk >/dev/null 2>&1 || die "Bundle thiếu iOS SD
 [ -x "$THEOS_DIR/bin/ldid" ] || command -v ldid >/dev/null 2>&1 || die "Bundle thiếu ldid (app sẽ không mở được)."
 ok "toolchain + SDK + ldid hợp lệ"
 
+# 4b. Bảo đảm thư viện runtime cho toolchain clang.
+#     Ubuntu mới (24.04/26.04) đổi soname (vd thiếu libz3.so.4) -> tự cài/symlink.
+ensure_toolchain_libs() {
+    local clang="$THEOS_DIR/toolchain/linux/iphone/bin/clang"
+    local miss
+    miss="$(ldd "$clang" 2>/dev/null | awk '/not found/{print $1}')"
+    [ -z "$miss" ] && return 0
+    log "Toolchain thiếu thư viện:$miss — đang cài/đối chiếu..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y -qq libz3-4 z3 libncurses6 libtinfo6 zlib1g libxml2 >/dev/null 2>&1 || true
+    for lib in $miss; do
+        ldconfig -p | grep -q "$lib" && continue
+        local base cand
+        base="${lib%%.so*}"
+        cand="$(find /usr/lib /lib -name "${base}.so*" 2>/dev/null | sort -V | tail -1)"
+        [ -n "$cand" ] && ln -sf "$cand" "/usr/lib/x86_64-linux-gnu/$lib"
+    done
+    ldconfig
+    if ldd "$clang" 2>/dev/null | grep -q 'not found'; then
+        ldd "$clang" 2>/dev/null | grep 'not found' | sed 's/^/  /'
+        die "Toolchain vẫn thiếu thư viện (ở trên). Cài gói tương ứng rồi chạy lại."
+    fi
+    ok "đã bù đủ thư viện toolchain"
+}
+ensure_toolchain_libs
+
 # 5. Build trên ext4 (copy nguồn sạch)
 log "Build..."
 rm -rf "$BUILD_DIR"; mkdir -p "$BUILD_DIR"

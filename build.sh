@@ -159,6 +159,24 @@ for s in preinst postinst prerm postrm; do
 done
 chown -R builder:builder "$BUILD_DIR"
 
+# Bảo đảm thư viện runtime cho toolchain (Ubuntu mới đổi soname, vd libz3.so.4)
+CLANG_BIN="$THEOS_DIR/toolchain/linux/iphone/bin/clang"
+MISS="$(ldd "$CLANG_BIN" 2>/dev/null | awk '/not found/{print $1}')"
+if [ -n "$MISS" ]; then
+    log "Toolchain thiếu thư viện:$MISS — đang cài/đối chiếu..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y -qq libz3-4 z3 libncurses6 libtinfo6 zlib1g libxml2 >/dev/null 2>&1 || true
+    for lib in $MISS; do
+        ldconfig -p | grep -q "$lib" && continue
+        base="${lib%%.so*}"
+        cand="$(find /usr/lib /lib -name "${base}.so*" 2>/dev/null | sort -V | tail -1)"
+        [ -n "$cand" ] && ln -sf "$cand" "/usr/lib/x86_64-linux-gnu/$lib"
+    done
+    ldconfig
+    ldd "$CLANG_BIN" 2>/dev/null | grep -q 'not found' && die "Toolchain vẫn thiếu thư viện. Cài gói tương ứng rồi chạy lại."
+    ok "đã bù đủ thư viện toolchain"
+fi
+
 log "Build 2 biến thể: ROOTLESS + ROOTFUL..."
 su - builder -c "
     set -e
