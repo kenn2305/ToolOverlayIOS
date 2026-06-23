@@ -159,44 +159,58 @@ for s in preinst postinst prerm postrm; do
 done
 chown -R builder:builder "$BUILD_DIR"
 
+log "Build 2 biến thể: ROOTLESS + ROOTFUL..."
 su - builder -c "
     set -e
     umask 022
     export THEOS='$THEOS_DIR'
     export PATH='$THEOS_DIR/bin':\$PATH
     cd '$BUILD_DIR'
+    rm -rf out; mkdir -p out
+
+    echo '=== [1/2] ROOTLESS (Dopamine, XinaA15...) ==='
     make clean >/dev/null 2>&1 || true
     make package FINALPACKAGE=1
+    cp -f packages/*.deb out/rootless.deb
+
+    echo '=== [2/2] ROOTFUL (unc0ver, checkra1n, palera1n-rootful...) ==='
+    make clean >/dev/null 2>&1 || true
+    make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=
+    cp -f packages/*.deb out/rootful.deb
 " || die "make package THẤT BẠI (xem log phía trên)."
 
 # ----------------------------------------------------
 # 8. Kiểm tra OUTPUT thật sự đúng rồi mới báo thành công
 # ----------------------------------------------------
 log "[8/8] Kiểm tra sản phẩm..."
-DEB="$(ls -t "$BUILD_DIR"/packages/*.deb 2>/dev/null | head -1 || true)"
-[ -n "$DEB" ] || die "Build xong nhưng KHÔNG có .deb -> coi như thất bại."
+ROOTLESS_DEB="$BUILD_DIR/out/rootless.deb"
+ROOTFUL_DEB="$BUILD_DIR/out/rootful.deb"
+[ -f "$ROOTLESS_DEB" ] || die "Không tạo được bản ROOTLESS."
+[ -f "$ROOTFUL_DEB" ]  || die "Không tạo được bản ROOTFUL."
 
-# dylib phải đủ arm64 + arm64e (nếu thiếu arm64e -> XS Max không chạy).
+# dylib phải đủ arm64 + arm64e (mọi chip A8+).
 MERGED="$BUILD_DIR/.theos/obj/OverlayIOSTOOL.dylib"
 LIPO="$THEOS_DIR/toolchain/linux/iphone/bin/lipo"
 if [ -x "$LIPO" ] && [ -f "$MERGED" ]; then
     ARCHS_OUT="$("$LIPO" -info "$MERGED" 2>/dev/null || true)"
     log "  -> $ARCHS_OUT"
-    echo "$ARCHS_OUT" | grep -q "arm64e" || die "dylib THIẾU slice arm64e -> sẽ không chạy trên XS Max (A12+)."
+    echo "$ARCHS_OUT" | grep -q "arm64e" || die "dylib THIẾU slice arm64e."
     echo "$ARCHS_OUT" | grep -qw "arm64"  || die "dylib THIẾU slice arm64."
     ok "dylib đủ arm64 + arm64e"
 fi
 
-# Copy .deb về project (trên /mnt/e) để dễ lấy từ Windows.
+VER="$(grep -i '^Version:' "$PROJECT_DIR/control" | awk '{print $2}')"
+[ -n "$VER" ] || VER="dev"
 mkdir -p "$PROJECT_DIR/packages"
-cp -f "$DEB" "$PROJECT_DIR/packages/"
-OUT="$PROJECT_DIR/packages/$(basename "$DEB")"
+ROOTLESS_OUT="$PROJECT_DIR/packages/OverlayIOSTOOL_${VER}_rootless_arm64-arm64e.deb"
+ROOTFUL_OUT="$PROJECT_DIR/packages/OverlayIOSTOOL_${VER}_rootful_arm64-arm64e.deb"
+cp -f "$ROOTLESS_DEB" "$ROOTLESS_OUT"
+cp -f "$ROOTFUL_DEB" "$ROOTFUL_OUT"
 
 echo ""
 echo "============================================"
-echo -e "  \033[1;32m✅ BUILD THÀNH CÔNG & ĐÃ KIỂM TRA\033[0m"
+echo -e "  \033[1;32m✅ BUILD THÀNH CÔNG (rootless + rootful)\033[0m"
 echo "============================================"
-echo "File .deb: $OUT"
-ls -la "$OUT"
-echo ""
-echo "Cài lên máy JB:  dpkg -i '$(basename "$DEB")'   (hoặc qua Filza/Sileo)"
+echo "ROOTLESS (Dopamine...): $ROOTLESS_OUT"
+echo "ROOTFUL  (unc0ver...) : $ROOTFUL_OUT"
+ls -la "$ROOTLESS_OUT" "$ROOTFUL_OUT"
