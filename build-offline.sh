@@ -45,11 +45,16 @@ fi
 [ -f "$THEOS_DIR/makefiles/common.mk" ] || die "Giải nén thất bại: không thấy Theos trong bundle."
 ok "Theos sẵn sàng"
 
-# 3. Cài công cụ build. Ưu tiên gói trong bundle (offline). Nếu bản Ubuntu khác
-#    (vd 24.04) khiến gói bundle không khớp -> tự cài bù qua apt (cần mạng).
-if ls "$BUILDER_HOME"/apt-debs/*.deb >/dev/null 2>&1; then
-    log "Cài gói apt từ bundle (offline)..."
+# 3. Cài công cụ build.
+#    QUAN TRỌNG: gói trong bundle là của Ubuntu 22.04 (jammy). CHỈ được dpkg -i
+#    khi máy đúng jammy; cài đè lên bản Ubuntu khác (24.04/26.04...) sẽ HỎNG hệ
+#    thống gói (xung đột perl/libc...). Bản khác -> bỏ qua, dùng apt online.
+. /etc/os-release 2>/dev/null || true
+if ls "$BUILDER_HOME"/apt-debs/*.deb >/dev/null 2>&1 && [ "${VERSION_CODENAME:-}" = "jammy" ]; then
+    log "Ubuntu 22.04 (jammy) -> cài gói từ bundle (offline)..."
     dpkg -i "$BUILDER_HOME"/apt-debs/*.deb >/dev/null 2>&1 || true
+else
+    log "Ubuntu '${VERSION_CODENAME:-?}' (khác 22.04) -> bỏ qua gói bundle, dùng apt online."
 fi
 
 NEED=""
