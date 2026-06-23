@@ -53,6 +53,9 @@ ok "Theos sẵn sàng"
 if ls "$BUILDER_HOME"/apt-debs/*.deb >/dev/null 2>&1 && [ "${VERSION_CODENAME:-}" = "jammy" ]; then
     log "Ubuntu 22.04 (jammy) -> cài gói từ bundle (offline)..."
     dpkg -i "$BUILDER_HOME"/apt-debs/*.deb >/dev/null 2>&1 || true
+    # Chữa trạng thái dpkg/apt nếu gói bundle để lại phụ thuộc dở dang
+    dpkg --configure -a >/dev/null 2>&1 || true
+    apt-get -f install -y -qq >/dev/null 2>&1 || true
 else
     log "Ubuntu '${VERSION_CODENAME:-?}' (khác 22.04) -> bỏ qua gói bundle, dùng apt online."
 fi
@@ -89,6 +92,8 @@ ensure_toolchain_libs() {
     [ -z "$miss" ] && return 0
     log "Toolchain thiếu thư viện:$miss — đang cài/đối chiếu..."
     export DEBIAN_FRONTEND=noninteractive
+    dpkg --configure -a >/dev/null 2>&1 || true
+    apt-get -f install -y -qq >/dev/null 2>&1 || true
     apt-get update -qq >/dev/null 2>&1 || true
     # Cài TỪNG gói riêng: 1 tên không có (khác bản Ubuntu) sẽ không chặn các gói khác.
     for p in libz3-4 z3 libncurses6 libncursesw6 libtinfo6 zlib1g libxml2t64 libxml2; do
