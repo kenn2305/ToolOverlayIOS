@@ -3,7 +3,8 @@
 Tài liệu này hướng dẫn **từ máy trắng** đến lúc tool chạy trên iPhone.
 
 - Máy build: **Windows 10/11** (dùng WSL Ubuntu).
-- iPhone: **đã Jailbreak**, **iOS 15.0 – 16.x**, dòng **XS Max trở lên** (XS Max, 11, 12, 13, 14...).
+- iPhone: **đã Jailbreak**, **iOS 14.0 – 16.x**, mọi dòng máy (iPhone 6s → 16).
+  Hỗ trợ **cả rootless lẫn rootful** (Dopamine, unc0ver, checkra1n, palera1n...).
 
 > Tool gồm 2 phần, đóng trong **1 file `.deb`**: tweak overlay (chạy nền) + app
 > "Overlay Tool" (để chọn ảnh, chỉnh cài đặt).
@@ -56,9 +57,10 @@ Chọn **một** trong hai cách:
 
 1. Mở thư mục project trong File Explorer.
 2. **Double-click `BUILD.cmd`**.
-3. Đợi (lần đầu vài phút). Khi xong, cửa sổ `packages\` tự mở, chứa file:
+3. Đợi (lần đầu vài phút). Khi xong, cửa sổ `packages\` tự mở, chứa **2 file**:
    ```
-   com.vietanh.overlayiostool_5.8.0_iphoneos-arm64.deb
+   OverlayIOSTOOL_5.8.0_rootless_arm64-arm64e.deb   (Dopamine, XinaA15...)
+   OverlayIOSTOOL_5.8.0_rootful_arm64-arm64e.deb    (unc0ver, checkra1n, palera1n-rootful)
    ```
 Nếu báo `[LOI] May nay chua co WSL` → quay lại Phần 1.
 
@@ -66,7 +68,12 @@ Nếu báo `[LOI] May nay chua co WSL` → quay lại Phần 1.
 
 ## PHẦN 4 — Cài .deb lên iPhone (máy đã Jailbreak)
 
-Chép file `.deb` vào iPhone rồi cài bằng **một** trong các cách:
+**Chọn đúng file theo loại jailbreak:**
+- Jailbreak **rootless** (Dopamine, XinaA15) → dùng file **`...rootless...deb`**
+- Jailbreak **rootful** (unc0ver, checkra1n, palera1n rootful) → dùng file **`...rootful...deb`**
+- Không chắc? Bản **rootless** cho iOS 15–16 máy mới; bản **rootful** cho iOS 14 hoặc palera1n.
+
+Chép file `.deb` đã chọn vào iPhone rồi cài bằng **một** trong các cách:
 
 ### Cách 1 — Sileo / Zebra (dễ nhất)
 1. Chép `.deb` vào iPhone (AirDrop, hoặc app Files, hoặc Filza).
@@ -75,11 +82,11 @@ Chép file `.deb` vào iPhone rồi cài bằng **một** trong các cách:
 
 ### Cách 2 — Dòng lệnh (SSH)
 ```bash
-# trên máy tính, copy vào iPhone
-scp com.vietanh.overlayiostool_5.8.0_iphoneos-arm64.deb root@<IP_iPhone>:/var/mobile/
+# trên máy tính, copy file ĐÚNG LOẠI (rootless hoặc rootful) vào iPhone
+scp OverlayIOSTOOL_5.8.0_rootless_arm64-arm64e.deb root@<IP_iPhone>:/var/mobile/
 # SSH vào iPhone
 ssh root@<IP_iPhone>
-dpkg -i /var/mobile/com.vietanh.overlayiostool_5.8.0_iphoneos-arm64.deb
+dpkg -i /var/mobile/OverlayIOSTOOL_5.8.0_rootless_arm64-arm64e.deb
 killall SpringBoard
 ```
 
@@ -118,6 +125,7 @@ Sau khi cài, trên Home Screen sẽ có app **Overlay Tool**.
 
 ## Yêu cầu tương thích (đã kiểm tra)
 
-- Tweak build **arm64 + arm64e**, **minOS 15.0** → chạy XS Max (A12) đến iPhone 14 (A15).
-- Gói **rootless**, khoá đúng **iOS 15.0–16.x** (`firmware >= 15.0, << 17.0`).
-- Hợp Jailbreak rootless (Dopamine...).
+- Tweak build **arm64 + arm64e** → chạy mọi chip A8 → A18 (iPhone 6s → 16).
+- **minOS 14.0**, khoá **iOS 14.0–16.x** (`firmware >= 14.0, << 17.0`).
+- Xuất **2 bản**: **rootless** (/var/jb) + **rootful** (/) → hợp mọi loại jailbreak.
+- Có crash-guard chống treo táo (tự tắt sau 3 lần lỗi/120s).

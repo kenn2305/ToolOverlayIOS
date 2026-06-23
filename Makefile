@@ -1,4 +1,4 @@
-TARGET := iphone:14.5:15.0
+TARGET := iphone:14.5:14.0
 ARCHS = arm64 arm64e
 THEOS_PACKAGE_SCHEME = rootless
 INSTALL_TARGET_PROCESSES = SpringBoard

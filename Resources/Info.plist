@@ -35,7 +35,7 @@
 	<key>CFBundleVersion</key>
 	<string>3</string>
 	<key>MinimumOSVersion</key>
-	<string>15.0</string>
+	<string>14.0</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSPhotoLibraryUsageDescription</key>
