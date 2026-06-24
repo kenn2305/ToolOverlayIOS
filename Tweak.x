@@ -17,12 +17,12 @@
 #import <unistd.h>
 #import <string.h>
 
-static NSString * const kOverlayDirectory = @"/var/mobile/Media/OverlayIOSTOOL";
-static NSString * const kOverlayImagePath = @"/var/mobile/Media/OverlayIOSTOOL/overlay.png";
-static NSString * const kOverlaySettingsPath = @"/var/mobile/Media/OverlayIOSTOOL/settings.plist";
-static NSString * const kOverlayStatePath = @"/var/mobile/Media/OverlayIOSTOOL/state.plist";
-static NSString * const kSpringBoardGuardPath = @"/var/mobile/Media/OverlayIOSTOOL/springboard-guard.plist";
-static NSString * const kSpringBoardDisabledPath = @"/var/mobile/Media/OverlayIOSTOOL/disabled-after-crash";
+static NSString * const kOverlayDirectory = @"/var/mobile/Library/OverlayIOSTOOL";
+static NSString * const kOverlayImagePath = @"/var/mobile/Library/OverlayIOSTOOL/overlay.png";
+static NSString * const kOverlaySettingsPath = @"/var/mobile/Library/OverlayIOSTOOL/settings.plist";
+static NSString * const kOverlayStatePath = @"/var/mobile/Library/OverlayIOSTOOL/state.plist";
+static NSString * const kSpringBoardGuardPath = @"/var/mobile/Library/OverlayIOSTOOL/springboard-guard.plist";
+static NSString * const kSpringBoardDisabledPath = @"/var/mobile/Library/OverlayIOSTOOL/disabled-after-crash";
 static NSString * const kOverlayPasteboardName = @"com.vietanh.overlayiostool.image";
 static const char *kOverlayUpdatedNotification = "com.vietanh.overlayiostool.image-updated";
 static const char *kOverlayRemoveNotification = "com.vietanh.overlayiostool.image-remove";
@@ -30,7 +30,7 @@ static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.se
 static const char *kOverlayStateNotification = "com.vietanh.overlayiostool.state-updated";
 static const char *kOverlayDepositActionNotification = "com.vietanh.overlayiostool.action.deposit";
 static const char *kOverlayWithdrawActionNotification = "com.vietanh.overlayiostool.action.withdraw";
-static const char *kOverlayRealtimeSocketPath = "/var/mobile/Media/OverlayIOSTOOL/realtime.sock";
+static const char *kOverlayRealtimeSocketPath = "/var/mobile/Library/OverlayIOSTOOL/realtime.sock";
 static const uint32_t kOverlayRealtimeMagic = 0x4F495254;
 
 static BOOL gOverlayHostReady = NO;
@@ -514,10 +514,7 @@ static void animateOverlayAlphaForCurrentDimState(void) {
 }
 
 static BOOL rendersOverlayImage(void) {
-    // MỌI tiến trình có tweak (SpringBoard + mọi app) đều TỰ VẼ overlay trong
-    // process của mình -> overlay nổi ngay trên app đang mở (kiểu Snapper2),
-    // thay vì chỉ vẽ ở SpringBoard (nằm sau app nên không thấy).
-    return gOverlayProcessEnabled;
+    return gIsSpringBoardProcess;
 }
 
 static CGFloat overlayWindowLevel(void) {
@@ -699,32 +696,6 @@ static void attachGestures(UIImageView *imageView) {
     [imageView addGestureRecognizer:gQuickActionsTapGesture];
 }
 
-static UIWindowScene *activeOverlayWindowScene(void) {
-    UIWindowScene *fallback = nil;
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class]) {
-            continue;
-        }
-        if (scene.activationState == UISceneActivationStateForegroundActive) {
-            return (UIWindowScene *)scene;
-        }
-        if (!fallback) {
-            fallback = (UIWindowScene *)scene;
-        }
-    }
-    return fallback;
-}
-
-static void attachOverlayWindowScene(void) {
-    if (!gOverlayWindow) {
-        return;
-    }
-    UIWindowScene *scene = activeOverlayWindowScene();
-    if (scene && gOverlayWindow.windowScene != scene) {
-        gOverlayWindow.windowScene = scene;
-    }
-}
-
 static void ensureOverlayWindow(void) {
     if (gOverlayWindow || !gOverlayHostReady) {
         return;
@@ -736,9 +707,6 @@ static void ensureOverlayWindow(void) {
     gOverlayWindow.backgroundColor = UIColor.clearColor;
     gOverlayWindow.opaque = NO;
     gOverlayWindow.clipsToBounds = NO;
-    // iOS 13+: cửa sổ PHẢI gắn vào UIWindowScene mới hiển thị được, đồng thời
-    // tránh crash SpringBoard do thao tác trên cửa sổ không có scene.
-    attachOverlayWindowScene();
 
     UIViewController *rootViewController = [UIViewController new];
     rootViewController.view.backgroundColor = UIColor.clearColor;
@@ -1122,7 +1090,6 @@ static void showOverlayImage(UIImage *image) {
         if (!gOverlayWindow) {
             return;
         }
-        attachOverlayWindowScene();
 
         if (!gOverlayImageView) {
             gOverlayImageView = [[UIImageView alloc] initWithFrame:centeredFrameForImage(image)];
@@ -1278,7 +1245,6 @@ static void applyScaleLockMode(BOOL enabled) {
         gOverlayWindow.windowLevel = overlayWindowLevel();
         gOverlayWindow.userInteractionEnabled = YES;
         gOverlayWindow.rootViewController.view.userInteractionEnabled = YES;
-        attachOverlayWindowScene();
         gOverlayWindow.hidden = NO;
         if (!gOverlayWindow.isKeyWindow) {
             gPreviousKeyWindow = currentKeyWindowExcludingOverlay();
