@@ -25,5 +25,8 @@ OverlayIOSTOOLApp_CFLAGS = -fobjc-arc -O2
 OverlayIOSTOOLApp_FRAMEWORKS = UIKit
 OverlayIOSTOOLApp_RESOURCE_DIRS = Resources
 OverlayIOSTOOLApp_INSTALL_PATH = /Applications
+# Ký app với entitlements thoát sandbox để ghi được ảnh ra /var/mobile/Library
+# (nếu thiếu, app bị sandbox chặn -> không gửi được ảnh sang SpringBoard).
+OverlayIOSTOOLApp_CODESIGN_FLAGS = -Sentitlements.plist
 
 include $(THEOS_MAKE_PATH)/application.mk

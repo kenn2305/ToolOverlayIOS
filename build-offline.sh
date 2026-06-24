@@ -162,6 +162,40 @@ ROOTFUL_DEB="$BUILD_DIR/out/rootful.deb"
 [ -f "$ROOTLESS_DEB" ] || die "Không tạo được bản ROOTLESS."
 [ -f "$ROOTFUL_DEB" ]  || die "Không tạo được bản ROOTFUL."
 
+# Re-ký app companion với entitlements thoát sandbox (theos không áp CODESIGN_FLAGS
+# cho app, nên app bị sandbox chặn ghi ảnh). Giải nén deb -> ldid -> đóng gói lại.
+LDID_BIN="$THEOS_DIR/bin/ldid"; [ -x "$LDID_BIN" ] || LDID_BIN="$(command -v ldid || true)"
+resign_app_in_deb() {
+    local deb="$1" tmp appbin
+    [ -f "$PROJECT_DIR/entitlements.plist" ] || return 0
+    [ -n "$LDID_BIN" ] || return 0
+    tmp="$(mktemp -d)"
+    if dpkg-deb -R "$deb" "$tmp" 2>/dev/null; then
+        appbin="$(find "$tmp" -name OverlayIOSTOOLApp -type f 2>/dev/null | head -1)"
+        if [ -n "$appbin" ]; then
+            "$LDID_BIN" -S"$PROJECT_DIR/entitlements.plist" "$appbin" 2>/dev/null || true
+            chmod 0755 "$appbin"
+            chmod 0755 "$tmp/DEBIAN" 2>/dev/null || true
+            find "$tmp/DEBIAN" -type f -exec chmod 0755 {} + 2>/dev/null || true
+            dpkg-deb -b "$tmp" "$deb" >/dev/null 2>&1 || true
+        fi
+    fi
+    rm -rf "$tmp"
+}
+resign_app_in_deb "$ROOTLESS_DEB"
+resign_app_in_deb "$ROOTFUL_DEB"
+# Xác nhận entitlements đã vào (kiểm bản rootless)
+if [ -n "$LDID_BIN" ]; then
+    _t="$(mktemp -d)"; dpkg-deb -R "$ROOTLESS_DEB" "$_t" 2>/dev/null || true
+    _ab="$(find "$_t" -name OverlayIOSTOOLApp -type f 2>/dev/null | head -1)"
+    if [ -n "$_ab" ] && "$LDID_BIN" -e "$_ab" 2>/dev/null | grep -q 'platform-application'; then
+        ok "app đã có entitlements thoát sandbox"
+    else
+        rm -rf "$_t"; die "App vẫn THIẾU entitlements — kiểm tra ldid/entitlements.plist."
+    fi
+    rm -rf "$_t"
+fi
+
 # Verify kiến trúc dylib (đủ arm64 + arm64e cho mọi chip A8+)
 MERGED="$BUILD_DIR/.theos/obj/OverlayIOSTOOL.dylib"
 LIPO="$THEOS_DIR/toolchain/linux/iphone/bin/lipo"
