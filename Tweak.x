@@ -58,6 +58,9 @@ static BOOL gQuickActionsVisible = NO;
 static BOOL gScreenBlanked = NO;
 static BOOL gScreenLocked = NO;
 static BOOL gDataUnavailable = NO;
+static BOOL gManualPinchActive = NO;        // đang nhúm 2 ngón (tự tính, không qua recognizer)
+static CGFloat gManualPinchInitialDistance = 0;
+static CGSize gManualPinchInitialBounds = {0, 0};
 static NSUInteger gToggleGeneration = 0;
 static NSInteger gHideDelayMs = 300;
 static NSInteger gShowDelayMs = 300;
@@ -806,9 +809,9 @@ static void attachGestures(UIImageView *imageView) {
     gImagePanGesture.delegate = gGestureHandler;
     [imageView addGestureRecognizer:gImagePanGesture];
 
-    // KHÔNG gắn pinch lên imageView nữa: zoom 2 ngón do MỘT pinch trên root
-    // (gExpandedPinchGesture) đảm nhiệm cho CẢ 2 chế độ. Nếu gắn cả hai, mỗi ngón
-    // có thể rơi vào view khác nhau -> mỗi pinch chỉ nhận 1 ngón -> không zoom được.
+    // KHÔNG gắn pinch recognizer: zoom 2 ngón được xử lý TỰ TÍNH trong sendEvent
+    // (overlayHandleManualPinch) vì recognizer đa chạm hay không nhận diện trên cửa sổ
+    // overlay không-key.
 
     gImageLongPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleLongPress:)];
     gImageLongPressGesture.minimumPressDuration = 0.6;   // nhạy hơn (trước 1.0s khó kích hoạt)
@@ -976,12 +979,9 @@ static void updateExpandedPinchGesture(void) {
     }
 
     UIView *rootView = gOverlayRoot;
-    if (!gExpandedPinchGesture) {
-        gExpandedPinchGesture = [[UIPinchGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleExpandedPinch:)];
-        gExpandedPinchGesture.cancelsTouchesInView = YES;
-        gExpandedPinchGesture.delegate = gGestureHandler;
-        [rootView addGestureRecognizer:gExpandedPinchGesture];
-    }
+    // Zoom KHÔNG dùng UIPinchGestureRecognizer nữa: trên cửa sổ overlay (không phải key
+    // window) recognizer đa chạm hay không nhận diện -> nhúm 2 ngón không zoom. Thay vào
+    // đó tự tính khoảng cách 2 ngón trong sendEvent (xem overlayHandleManualPinch).
 
     if (!gRelativePanGesture) {
         gRelativePanGesture = [[UIPanGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleRelativePan:)];
@@ -996,7 +996,6 @@ static void updateExpandedPinchGesture(void) {
         gInputBlockTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleBlockedTap:)];
         gInputBlockTapGesture.cancelsTouchesInView = YES;
         gInputBlockTapGesture.delegate = gGestureHandler;
-        [gInputBlockTapGesture requireGestureRecognizerToFail:gExpandedPinchGesture];
         [gInputBlockTapGesture requireGestureRecognizerToFail:gRelativePanGesture];
         [rootView addGestureRecognizer:gInputBlockTapGesture];
     }
@@ -1480,8 +1479,7 @@ static void applyScaleLockMode(BOOL enabled) {
     gQuickActionsTapGesture.enabled = !enabled;
 
     // Reset recognizer state when switching modes, which is important on older devices.
-    gExpandedPinchGesture.enabled = NO;
-    gExpandedPinchGesture.enabled = YES;
+    gManualPinchActive = NO;
     gRelativePanGesture.enabled = NO;
     gRelativePanGesture.enabled = YES;
     gInputBlockTapGesture.enabled = NO;
@@ -1545,6 +1543,73 @@ static BOOL touchInsideOverlayImage(UITouch *touch) {
 
     CGPoint overlayPoint = [touch locationInView:gOverlayRoot];
     return pointInsideOverlayImage(overlayPoint);
+}
+
+// Zoom 2 ngón TỰ TÍNH (không qua UIPinchGestureRecognizer - vốn hay không nhận diện
+// trên cửa sổ overlay không-key). Lấy đúng 2 touch đầu đang chạm, đo khoảng cách, scale
+// kích thước ảnh theo tỉ lệ so với lúc bắt đầu nhúm. Viền xanh: 2 ngón ở đâu cũng được.
+// Chế độ thường: chỉ zoom khi CẢ 2 ngón nằm trong ảnh.
+static void overlayHandleManualPinch(UIEvent *event) {
+    if (!gOverlayImageView || gOverlayImageView.hidden || !gOverlayRoot || event.type != UIEventTypeTouches) {
+        gManualPinchActive = NO;
+        return;
+    }
+
+    NSMutableArray<UITouch *> *active = [NSMutableArray array];
+    for (UITouch *touch in event.allTouches) {
+        if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
+            continue;
+        }
+        [active addObject:touch];
+        if (active.count >= 2) {
+            break;
+        }
+    }
+
+    if (active.count < 2) {
+        if (gManualPinchActive) {
+            gManualPinchActive = NO;
+            persistOverlayState(YES);   // chốt kích thước khi nhấc ngón
+        }
+        return;
+    }
+
+    UITouch *t0 = active[0];
+    UITouch *t1 = active[1];
+
+    CGPoint p0 = [t0 locationInView:gOverlayRoot];
+    CGPoint p1 = [t1 locationInView:gOverlayRoot];
+    CGFloat dx = p0.x - p1.x;
+    CGFloat dy = p0.y - p1.y;
+    CGFloat distance = sqrt(dx * dx + dy * dy);
+    if (distance < 1.0) {
+        return;
+    }
+
+    if (!gManualPinchActive) {
+        // BẮT ĐẦU nhúm: chế độ thường yêu cầu CẢ 2 ngón đặt trong ảnh; viền xanh thì
+        // ở đâu cũng được. Đã bắt đầu rồi thì zoom tiếp tới khi nhấc ngón (kể cả ngón
+        // ra ngoài ảnh khi thu nhỏ).
+        if (!gScaleLockModeEnabled && (!touchInsideOverlayImage(t0) || !touchInsideOverlayImage(t1))) {
+            return;
+        }
+        gManualPinchActive = YES;
+        gManualPinchInitialDistance = distance;
+        gManualPinchInitialBounds = gOverlayImageView.bounds.size;
+        return;
+    }
+
+    CGFloat ratio = distance / gManualPinchInitialDistance;
+    CGFloat newW = gManualPinchInitialBounds.width * ratio;
+    CGFloat newH = gManualPinchInitialBounds.height * ratio;
+    CGFloat maxDimension = MAX(UIScreen.mainScreen.bounds.size.width, UIScreen.mainScreen.bounds.size.height) * 20.0;
+    if (newW >= 12 && newH >= 12 && newW <= maxDimension && newH <= maxDimension) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        gOverlayImageView.bounds = CGRectMake(0, 0, newW, newH);
+        [CATransaction commit];
+        syncOverlayStateRealtime(NO);
+    }
 }
 
 static void __attribute__((unused)) handleHiddenImageDoubleTapIfNeeded(UIEvent *event) {
@@ -1674,6 +1739,10 @@ static void scheduleActivationRetry(int attempt) {
     if (!view || gScaleLockModeEnabled) {
         return;
     }
+    if (gManualPinchActive) {   // đang nhúm 2 ngón -> không cho 1 ngón kéo trôi ảnh
+        [gesture setTranslation:CGPointZero inView:view.superview];
+        return;
+    }
 
     CGPoint translation = [gesture translationInView:view.superview];
     view.center = CGPointMake(view.center.x + translation.x, view.center.y + translation.y);
@@ -1728,41 +1797,8 @@ static void scheduleActivationRetry(int attempt) {
     notify_post(kOverlayWithdrawActionNotification);
 }
 
-- (void)handleExpandedPinch:(UIPinchGestureRecognizer *)gesture {
-    if (!gOverlayImageView) {
-        return;
-    }
-
-    if (gesture.state == UIGestureRecognizerStateEnded ||
-        gesture.state == UIGestureRecognizerStateCancelled ||
-        gesture.state == UIGestureRecognizerStateFailed) {
-        gesture.scale = 1.0;
-        syncOverlayStateRealtime(YES);
-        return;
-    }
-
-    if (gesture.numberOfTouches < 2) {
-        gesture.scale = 1.0;
-        return;
-    }
-
-    // Zoom từ MỌI vị trí 2 ngón (cả normal lẫn viền xanh) - không giới hạn quanh ảnh.
-    CGFloat scale = MAX(0.5, MIN(gesture.scale, 2.0));
-    CGSize newSize = CGSizeMake(gOverlayImageView.bounds.size.width * scale, gOverlayImageView.bounds.size.height * scale);
-    CGFloat maxDimension = MAX(UIScreen.mainScreen.bounds.size.width, UIScreen.mainScreen.bounds.size.height) * 20.0;
-    if (newSize.width >= 12 && newSize.height >= 12 &&
-        newSize.width <= maxDimension && newSize.height <= maxDimension) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        gOverlayImageView.bounds = CGRectMake(0, 0, newSize.width, newSize.height);
-        [CATransaction commit];
-    }
-    gesture.scale = 1.0;
-    syncOverlayStateRealtime(NO);
-}
-
 - (void)handleRelativePan:(UIPanGestureRecognizer *)gesture {
-    if (!gScaleLockModeEnabled || !gOverlayImageView) {
+    if (!gScaleLockModeEnabled || !gOverlayImageView || gManualPinchActive) {
         [gesture setTranslation:CGPointZero inView:gOverlayRoot];
         return;
     }
@@ -1805,11 +1841,6 @@ static void scheduleActivationRetry(int attempt) {
     }
     if (gestureRecognizer == gQuickActionsTapGesture) {
         return !gScaleLockModeEnabled;
-    }
-    if (gestureRecognizer == gExpandedPinchGesture) {
-        // Nhận touch ở CẢ 2 chế độ (kể cả khi ngón đặt trên ảnh) để pinch luôn gom
-        // đủ 2 ngón. Pinch chỉ thực sự zoom khi có >=2 touch (xem handleExpandedPinch).
-        return YES;
     }
     if (gestureRecognizer == gInputBlockTapGesture) {
         return gScaleLockModeEnabled;
@@ -1867,6 +1898,7 @@ static void scheduleActivationRetry(int attempt) {
         }
 
         %orig(event);
+        overlayHandleManualPinch(event);   // viền xanh: 2 ngón ở đâu cũng zoom
         return;
     }
 
@@ -1877,6 +1909,9 @@ static void scheduleActivationRetry(int attempt) {
     }
 
     handleHiddenImageDoubleTapIfNeeded(event);
+
+    // Chế độ thường: 2 ngón TRONG ảnh -> zoom (tự tính, không qua recognizer).
+    overlayHandleManualPinch(event);
 
     if (gScaleLockModeEnabled || !gToggleClickEnabled || !gOverlayImageView || event.type != UIEventTypeTouches) {
         return;
