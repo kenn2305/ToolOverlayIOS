@@ -1,10 +1,10 @@
 #import "ViewController.h"
 #import <notify.h>
 
-static NSString * const kOverlayDirectory = @"/var/mobile/Library/OverlayIOSTOOL";
-static NSString * const kOverlayImagePath = @"/var/mobile/Library/OverlayIOSTOOL/overlay.png";
-static NSString * const kOverlaySettingsPath = @"/var/mobile/Library/OverlayIOSTOOL/settings.plist";
-static NSString * const kOverlayStatePath = @"/var/mobile/Library/OverlayIOSTOOL/state.plist";
+static NSString * const kOverlayDirectory = @"/var/mobile/Media/OverlayIOSTOOL";
+static NSString * const kOverlayImagePath = @"/var/mobile/Media/OverlayIOSTOOL/overlay.png";
+static NSString * const kOverlaySettingsPath = @"/var/mobile/Media/OverlayIOSTOOL/settings.plist";
+static NSString * const kOverlayStatePath = @"/var/mobile/Media/OverlayIOSTOOL/state.plist";
 static NSString * const kOverlayPasteboardName = @"com.vietanh.overlayiostool.image";
 static const char *kOverlayUpdatedNotification = "com.vietanh.overlayiostool.image-updated";
 static const char *kOverlayRemoveNotification = "com.vietanh.overlayiostool.image-remove";

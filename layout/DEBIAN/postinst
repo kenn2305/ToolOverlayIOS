@@ -1,10 +1,10 @@
 #!/bin/bash
 export PATH="/var/jb/usr/bin:/var/jb/usr/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
 
-rm -f /var/mobile/Library/OverlayIOSTOOL/overlay.png 2>/dev/null || true
-rm -f /var/mobile/Library/OverlayIOSTOOL/state.plist 2>/dev/null || true
-rm -f /var/mobile/Library/OverlayIOSTOOL/springboard-guard.plist 2>/dev/null || true
-rm -f /var/mobile/Library/OverlayIOSTOOL/disabled-after-crash 2>/dev/null || true
+rm -f /var/mobile/Media/OverlayIOSTOOL/overlay.png 2>/dev/null || true
+rm -f /var/mobile/Media/OverlayIOSTOOL/state.plist 2>/dev/null || true
+rm -f /var/mobile/Media/OverlayIOSTOOL/springboard-guard.plist 2>/dev/null || true
+rm -f /var/mobile/Media/OverlayIOSTOOL/disabled-after-crash 2>/dev/null || true
 
 UICACHE=""
 if [ -x /var/jb/usr/bin/uicache ]; then
