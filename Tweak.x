@@ -67,6 +67,8 @@ static int gLongPressGeneration = 0;
 static CGPoint gLongPressStart = {0, 0};
 static BOOL gTapCandidate = NO;             // chạm 1 ngón trên ảnh, có thể là tap mở panel
 static CGPoint gTapStart = {0, 0};
+static BOOL gManualPanActive = NO;          // đang kéo 1 ngón di chuyển ảnh (viền xanh, tự tính)
+static CGPoint gManualPanLast = {0, 0};
 static NSUInteger gToggleGeneration = 0;
 static NSInteger gHideDelayMs = 300;
 static NSInteger gShowDelayMs = 300;
@@ -982,27 +984,11 @@ static void updateExpandedPinchGesture(void) {
         return;
     }
 
-    UIView *rootView = gOverlayRoot;
-    // Zoom KHÔNG dùng UIPinchGestureRecognizer nữa: trên cửa sổ overlay (không phải key
-    // window) recognizer đa chạm hay không nhận diện -> nhúm 2 ngón không zoom. Thay vào
-    // đó tự tính khoảng cách 2 ngón trong sendEvent (xem overlayHandleManualPinch).
-
-    if (!gRelativePanGesture) {
-        gRelativePanGesture = [[UIPanGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleRelativePan:)];
-        gRelativePanGesture.minimumNumberOfTouches = 1;
-        gRelativePanGesture.maximumNumberOfTouches = 1;
-        gRelativePanGesture.cancelsTouchesInView = YES;
-        gRelativePanGesture.delegate = gGestureHandler;
-        [rootView addGestureRecognizer:gRelativePanGesture];
-    }
-
-    if (!gInputBlockTapGesture) {
-        gInputBlockTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleBlockedTap:)];
-        gInputBlockTapGesture.cancelsTouchesInView = YES;
-        gInputBlockTapGesture.delegate = gGestureHandler;
-        [gInputBlockTapGesture requireGestureRecognizerToFail:gRelativePanGesture];
-        [rootView addGestureRecognizer:gInputBlockTapGesture];
-    }
+    // Viền xanh KHÔNG dùng recognizer nữa (đa chạm/đơn chạm đều hay không nhận diện trên
+    // cửa sổ overlay không-key): zoom 2 ngón, di chuyển 1 ngón và giữ-lâu thoát đều xử lý
+    // TỰ TÍNH trong sendEvent (overlayHandleManualPinch/Pan/LongPress). Việc chặn input
+    // phía sau do hitTest (trả root cho cả màn) + sendEvent (nuốt touch ngoài overlay).
+    (void)gOverlayRoot;
 }
 
 static UILabel *overlayControlLabel(NSString *text, CGFloat fontSize, UIFontWeight weight) {
@@ -1479,15 +1465,13 @@ static void applyScaleLockMode(BOOL enabled) {
     gToggleGeneration++;
 
     gImagePanGesture.enabled = !enabled;
-    gImagePinchGesture.enabled = !enabled;
-    gQuickActionsTapGesture.enabled = !enabled;
 
-    // Reset recognizer state when switching modes, which is important on older devices.
+    // Reset trạng thái cử chỉ tự tính khi đổi chế độ.
     gManualPinchActive = NO;
-    gRelativePanGesture.enabled = NO;
-    gRelativePanGesture.enabled = YES;
-    gInputBlockTapGesture.enabled = NO;
-    gInputBlockTapGesture.enabled = YES;
+    gManualPanActive = NO;
+    gLongPressTracking = NO;
+    gLongPressGeneration++;
+    gTapCandidate = NO;
 
     if (enabled) {
         gOverlayVisible = YES;
@@ -1616,6 +1600,59 @@ static void overlayHandleManualPinch(UIEvent *event) {
     }
 }
 
+// Ngón đang chạm vào bảng điều khiển (sliders/nút) của viền xanh? -> không coi là pan/giữ.
+static BOOL touchOnScaleLockControls(UITouch *touch) {
+    if (!touch || !gScaleLockControlsPanel || gScaleLockControlsPanel.hidden || !gOverlayRoot) {
+        return NO;
+    }
+    CGPoint p = [touch locationInView:gOverlayRoot];
+    return pointInsideScaleLockControls(p);
+}
+
+// Di chuyển ảnh bằng 1 ngón TỰ TÍNH (không qua UIPanGestureRecognizer). CHỈ ở viền xanh:
+// 1 ngón ở BẤT KỲ đâu trên màn hình -> kéo ảnh theo. Bỏ qua khi chạm vào bảng điều khiển
+// hoặc khi đang nhúm 2 ngón.
+static void overlayHandleManualPan(UIEvent *event) {
+    if (!gScaleLockModeEnabled || !gOverlayImageView || event.type != UIEventTypeTouches) {
+        gManualPanActive = NO;
+        return;
+    }
+
+    NSUInteger activeCount = 0;
+    UITouch *single = nil;
+    for (UITouch *touch in event.allTouches) {
+        if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
+            continue;
+        }
+        activeCount++;
+        single = touch;
+    }
+
+    if (activeCount != 1 || gManualPinchActive || touchOnScaleLockControls(single)) {
+        gManualPanActive = NO;
+        return;
+    }
+
+    CGPoint p = [single locationInView:gOverlayRoot];
+    if (!gManualPanActive) {
+        gManualPanActive = YES;
+        gManualPanLast = p;
+        return;
+    }
+
+    CGFloat dx = p.x - gManualPanLast.x;
+    CGFloat dy = p.y - gManualPanLast.y;
+    gManualPanLast = p;
+    if (dx == 0 && dy == 0) {
+        return;
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    gOverlayImageView.center = CGPointMake(gOverlayImageView.center.x + dx, gOverlayImageView.center.y + dy);
+    [CATransaction commit];
+    syncOverlayStateRealtime(NO);
+}
+
 // Giữ-lâu 1 ngón TỰ TÍNH (không qua UILongPressGestureRecognizer - cũng hay không nhận
 // diện trên cửa sổ overlay không-key). Giữ 1 ngón yên ~0.6s -> bật/tắt viền xanh.
 // Viền xanh: giữ ở ĐÂU cũng thoát. Chế độ thường: phải giữ TRÊN ảnh mới vào viền xanh.
@@ -1646,6 +1683,13 @@ static void overlayHandleManualLongPress(UIEvent *event) {
 
     if (gLongPressConsumed) {
         return;   // đã toggle bằng lần giữ này -> chờ nhấc tay rồi mới nhận lần mới
+    }
+
+    // Chạm vào bảng điều khiển viền xanh -> không tính giữ-lâu (để chỉnh slider yên).
+    if (touchOnScaleLockControls(single)) {
+        gLongPressTracking = NO;
+        gLongPressGeneration++;
+        return;
     }
 
     CGPoint p = [single locationInView:gOverlayRoot];
@@ -2022,6 +2066,7 @@ static void scheduleActivationRetry(int attempt) {
 
         %orig(event);
         overlayHandleManualPinch(event);       // viền xanh: 2 ngón ở đâu cũng zoom
+        overlayHandleManualPan(event);         // viền xanh: 1 ngón ở đâu cũng di chuyển ảnh
         overlayHandleManualLongPress(event);   // viền xanh: giữ-lâu 1 ngón -> thoát
         return;
     }
