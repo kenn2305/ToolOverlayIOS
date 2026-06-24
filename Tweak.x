@@ -65,6 +65,8 @@ static BOOL gLongPressTracking = NO;        // đang đếm giờ giữ-lâu 1 n
 static BOOL gLongPressConsumed = NO;        // đã toggle bằng lần giữ này -> chờ nhấc tay
 static int gLongPressGeneration = 0;
 static CGPoint gLongPressStart = {0, 0};
+static BOOL gTapCandidate = NO;             // chạm 1 ngón trên ảnh, có thể là tap mở panel
+static CGPoint gTapStart = {0, 0};
 static NSUInteger gToggleGeneration = 0;
 static NSInteger gHideDelayMs = 300;
 static NSInteger gShowDelayMs = 300;
@@ -821,10 +823,8 @@ static void attachGestures(UIImageView *imageView) {
     // TÍNH trong sendEvent (overlayHandleManualLongPress) vì recognizer cũng hay không
     // nhận diện trên cửa sổ overlay không-key.
 
-    gQuickActionsTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleQuickActionsTap:)];
-    gQuickActionsTapGesture.numberOfTapsRequired = 1;
-    gQuickActionsTapGesture.delegate = gGestureHandler;
-    [imageView addGestureRecognizer:gQuickActionsTapGesture];
+    // KHÔNG gắn tap recognizer: tap mở panel nạp/rút được xử lý TỰ TÍNH trong sendEvent
+    // (overlayHandleManualTap) cho đáng tin trên cửa sổ overlay không-key.
 }
 
 static UIWindowScene *foregroundOverlayScene(void) {
@@ -1678,6 +1678,62 @@ static void overlayHandleManualLongPress(UIEvent *event) {
     }
 }
 
+// Tap 1 ngón TRÊN ẢNH (tự tính, không qua recognizer) -> hiện panel nạp/rút. KHÔNG làm
+// mờ ảnh (dim chỉ xảy ra khi chạm NGOÀI ảnh). Chỉ chạy ở chế độ thường (không viền xanh).
+static void overlayHandleManualTap(UIEvent *event) {
+    if (gScaleLockModeEnabled || !gOverlayImageView || event.type != UIEventTypeTouches) {
+        gTapCandidate = NO;
+        return;
+    }
+
+    // Nhúm 2 ngón -> không phải tap.
+    if (event.allTouches.count >= 2) {
+        gTapCandidate = NO;
+        return;
+    }
+
+    NSUInteger activeCount = 0;
+    UITouch *anyTouch = nil;
+    UITouch *endedTouch = nil;
+    for (UITouch *touch in event.allTouches) {
+        if (touch.phase == UITouchPhaseEnded) {
+            endedTouch = touch;
+        }
+        if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
+            continue;
+        }
+        activeCount++;
+        anyTouch = touch;
+    }
+
+    if (anyTouch && anyTouch.phase == UITouchPhaseBegan) {
+        // Bắt đầu 1 ngón: chỉ là ứng viên tap nếu đặt TRÊN ảnh.
+        gTapCandidate = touchInsideOverlayImage(anyTouch);
+        gTapStart = [anyTouch locationInView:gOverlayRoot];
+        return;
+    }
+
+    if (anyTouch && anyTouch.phase == UITouchPhaseMoved && gTapCandidate) {
+        CGPoint p = [anyTouch locationInView:gOverlayRoot];
+        CGFloat dx = p.x - gTapStart.x;
+        CGFloat dy = p.y - gTapStart.y;
+        if (dx * dx + dy * dy > 18.0 * 18.0) {
+            gTapCandidate = NO;   // đã kéo -> không phải tap
+        }
+        return;
+    }
+
+    // Nhấc ngón cuối: nếu vẫn là tap hợp lệ (không kéo, không giữ-lâu, không nhúm) -> panel.
+    if (endedTouch && activeCount == 0) {
+        BOOL valid = gTapCandidate && !gLongPressConsumed && !gManualPinchActive &&
+                     touchInsideOverlayImage(endedTouch);
+        gTapCandidate = NO;
+        if (valid) {
+            showOverlayQuickActions();
+        }
+    }
+}
+
 static void __attribute__((unused)) handleHiddenImageDoubleTapIfNeeded(UIEvent *event) {
     if (gScaleLockModeEnabled || !gOverlayImageView || gOverlayVisible || event.type != UIEventTypeTouches) {
         return;
@@ -1977,9 +2033,11 @@ static void scheduleActivationRetry(int attempt) {
 
     handleHiddenImageDoubleTapIfNeeded(event);
 
-    // Chế độ thường: 2 ngón TRONG ảnh -> zoom; giữ-lâu 1 ngón trên ảnh -> vào viền xanh.
+    // Chế độ thường: 2 ngón TRONG ảnh -> zoom; giữ-lâu 1 ngón trên ảnh -> vào viền xanh;
+    // tap 1 ngón trên ảnh -> hiện panel nạp/rút (KHÔNG làm mờ ảnh).
     overlayHandleManualPinch(event);
     overlayHandleManualLongPress(event);
+    overlayHandleManualTap(event);
 
     if (gScaleLockModeEnabled || !gToggleClickEnabled || !gOverlayImageView || event.type != UIEventTypeTouches) {
         return;
