@@ -61,6 +61,10 @@ static BOOL gDataUnavailable = NO;
 static BOOL gManualPinchActive = NO;        // đang nhúm 2 ngón (tự tính, không qua recognizer)
 static CGFloat gManualPinchInitialDistance = 0;
 static CGSize gManualPinchInitialBounds = {0, 0};
+static BOOL gLongPressTracking = NO;        // đang đếm giờ giữ-lâu 1 ngón (tự tính)
+static BOOL gLongPressConsumed = NO;        // đã toggle bằng lần giữ này -> chờ nhấc tay
+static int gLongPressGeneration = 0;
+static CGPoint gLongPressStart = {0, 0};
 static NSUInteger gToggleGeneration = 0;
 static NSInteger gHideDelayMs = 300;
 static NSInteger gShowDelayMs = 300;
@@ -813,16 +817,13 @@ static void attachGestures(UIImageView *imageView) {
     // (overlayHandleManualPinch) vì recognizer đa chạm hay không nhận diện trên cửa sổ
     // overlay không-key.
 
-    gImageLongPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleLongPress:)];
-    gImageLongPressGesture.minimumPressDuration = 0.6;   // nhạy hơn (trước 1.0s khó kích hoạt)
-    gImageLongPressGesture.allowableMovement = 24.0;     // dung sai rung tay lớn hơn -> pan không cướp mất
-    gImageLongPressGesture.delegate = gGestureHandler;
-    [imageView addGestureRecognizer:gImageLongPressGesture];
+    // KHÔNG gắn long-press recognizer: giữ-lâu để vào/thoát viền xanh được xử lý TỰ
+    // TÍNH trong sendEvent (overlayHandleManualLongPress) vì recognizer cũng hay không
+    // nhận diện trên cửa sổ overlay không-key.
 
     gQuickActionsTapGesture = [[UITapGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleQuickActionsTap:)];
     gQuickActionsTapGesture.numberOfTapsRequired = 1;
     gQuickActionsTapGesture.delegate = gGestureHandler;
-    [gQuickActionsTapGesture requireGestureRecognizerToFail:gImageLongPressGesture];
     [imageView addGestureRecognizer:gQuickActionsTapGesture];
 }
 
@@ -1612,6 +1613,71 @@ static void overlayHandleManualPinch(UIEvent *event) {
     }
 }
 
+// Giữ-lâu 1 ngón TỰ TÍNH (không qua UILongPressGestureRecognizer - cũng hay không nhận
+// diện trên cửa sổ overlay không-key). Giữ 1 ngón yên ~0.6s -> bật/tắt viền xanh.
+// Viền xanh: giữ ở ĐÂU cũng thoát. Chế độ thường: phải giữ TRÊN ảnh mới vào viền xanh.
+static void overlayHandleManualLongPress(UIEvent *event) {
+    if (!gOverlayImageView || event.type != UIEventTypeTouches) {
+        return;
+    }
+
+    NSUInteger activeCount = 0;
+    UITouch *single = nil;
+    for (UITouch *touch in event.allTouches) {
+        if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
+            continue;
+        }
+        activeCount++;
+        single = touch;
+    }
+
+    // 0 hoặc >=2 ngón -> không phải giữ-lâu 1 ngón. Nhấc hết tay thì cho phép lần giữ mới.
+    if (activeCount != 1) {
+        gLongPressTracking = NO;
+        gLongPressGeneration++;
+        if (activeCount == 0) {
+            gLongPressConsumed = NO;
+        }
+        return;
+    }
+
+    if (gLongPressConsumed) {
+        return;   // đã toggle bằng lần giữ này -> chờ nhấc tay rồi mới nhận lần mới
+    }
+
+    CGPoint p = [single locationInView:gOverlayRoot];
+
+    // Chế độ thường: chỉ nhận giữ-lâu khi ngón TRÊN ảnh (để vào viền xanh).
+    if (!gScaleLockModeEnabled && !touchInsideOverlayImage(single)) {
+        gLongPressTracking = NO;
+        gLongPressGeneration++;
+        return;
+    }
+
+    if (!gLongPressTracking) {
+        gLongPressTracking = YES;
+        gLongPressStart = p;
+        int gen = ++gLongPressGeneration;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (gen != gLongPressGeneration || !gLongPressTracking) {
+                return;
+            }
+            gLongPressTracking = NO;
+            gLongPressConsumed = YES;
+            applyScaleLockMode(!gScaleLockModeEnabled);
+        });
+        return;
+    }
+
+    // Đang đếm giờ: di chuyển quá xa -> huỷ (coi như kéo, không phải giữ-lâu).
+    CGFloat dx = p.x - gLongPressStart.x;
+    CGFloat dy = p.y - gLongPressStart.y;
+    if (dx * dx + dy * dy > 28.0 * 28.0) {
+        gLongPressTracking = NO;
+        gLongPressGeneration++;
+    }
+}
+
 static void __attribute__((unused)) handleHiddenImageDoubleTapIfNeeded(UIEvent *event) {
     if (gScaleLockModeEnabled || !gOverlayImageView || gOverlayVisible || event.type != UIEventTypeTouches) {
         return;
@@ -1898,7 +1964,8 @@ static void scheduleActivationRetry(int attempt) {
         }
 
         %orig(event);
-        overlayHandleManualPinch(event);   // viền xanh: 2 ngón ở đâu cũng zoom
+        overlayHandleManualPinch(event);       // viền xanh: 2 ngón ở đâu cũng zoom
+        overlayHandleManualLongPress(event);   // viền xanh: giữ-lâu 1 ngón -> thoát
         return;
     }
 
@@ -1910,8 +1977,9 @@ static void scheduleActivationRetry(int attempt) {
 
     handleHiddenImageDoubleTapIfNeeded(event);
 
-    // Chế độ thường: 2 ngón TRONG ảnh -> zoom (tự tính, không qua recognizer).
+    // Chế độ thường: 2 ngón TRONG ảnh -> zoom; giữ-lâu 1 ngón trên ảnh -> vào viền xanh.
     overlayHandleManualPinch(event);
+    overlayHandleManualLongPress(event);
 
     if (gScaleLockModeEnabled || !gToggleClickEnabled || !gOverlayImageView || event.type != UIEventTypeTouches) {
         return;
