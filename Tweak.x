@@ -1417,12 +1417,16 @@ static void activateOverlayHost(void) {
         NSLog(@"[OverlayIOSTOOL] Overlay host ready in %@", NSBundle.mainBundle.bundleIdentifier ?: NSProcessInfo.processInfo.processName);
     }
 
-    if (!gIsSpringBoardProcess && ![NSFileManager.defaultManager fileExistsAtPath:kOverlayImagePath] && !overlayPasteboard(NO).image) {
-        return;
-    }
-
-    if (!gIsSpringBoardProcess) {
+    // MỌI tiến trình (kể cả SpringBoard ở màn hình chính) khi trở thành active
+    // sẽ tải + hiện lại overlay -> overlay nổi MỌI LÚC, kể cả khi không mở app nào.
+    BOOL hasPublishedImage = [NSFileManager.defaultManager fileExistsAtPath:kOverlayImagePath]
+                             || overlayPasteboard(NO).image != nil;
+    if (hasPublishedImage) {
         loadAndShowPublishedOverlay();
+    } else if (gOverlayImageView) {
+        // overlay đã tạo từ trước -> chỉ gắn lại scene của tiến trình foreground hiện tại.
+        attachOverlayWindowScene();
+        refreshOverlayWindowVisibility();
     }
 }
 
