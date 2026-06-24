@@ -1,4 +1,4 @@
-TARGET := iphone:15.0:14.0
+TARGET := iphone:latest:14.0
 # arm64 + arm64e: build bằng XCODE THẬT trên macOS (GitHub Actions) -> arm64e CHUẨN,
 # nạp vào SpringBoard arm64e (A12+, vd iPhone 11) mà KHÔNG PAC-crash. SpringBoard
 # render overlay nổi trên mọi app + màn hình chính (như iPhone 6/7). Slice arm64 cho
