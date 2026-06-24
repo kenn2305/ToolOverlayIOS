@@ -813,8 +813,8 @@ static void attachGestures(UIImageView *imageView) {
     [imageView addGestureRecognizer:gImagePinchGesture];
 
     gImageLongPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleLongPress:)];
-    gImageLongPressGesture.minimumPressDuration = 1.0;
-    gImageLongPressGesture.allowableMovement = 12.0;
+    gImageLongPressGesture.minimumPressDuration = 0.6;   // nhạy hơn (trước 1.0s khó kích hoạt)
+    gImageLongPressGesture.allowableMovement = 24.0;     // dung sai rung tay lớn hơn -> pan không cướp mất
     gImageLongPressGesture.delegate = gGestureHandler;
     [imageView addGestureRecognizer:gImageLongPressGesture];
 
@@ -1288,7 +1288,10 @@ static UIImage *overlayImageFromSharedFile(void) {
     return [UIImage imageWithData:imageData scale:UIScreen.mainScreen.scale];
 }
 
-static void showOverlayImage(UIImage *image) {
+// resetFrame=YES: ảnh MỚI do người dùng vừa chọn -> bỏ vị trí/kích thước cũ, đưa
+// về khung giữa màn hình, thoát viền xanh, ghi đè state.plist. resetFrame=NO: chỉ
+// khôi phục ảnh đang có (foreground app / đồng bộ state) -> giữ nguyên frame đã lưu.
+static void showOverlayImage(UIImage *image, BOOL resetFrame) {
     if (!image) {
         return;
     }
@@ -1301,27 +1304,53 @@ static void showOverlayImage(UIImage *image) {
             return;
         }
 
+        BOOL doReset = resetFrame;
         if (!gOverlayImageView) {
             overlayLog(@"showOverlayImage: tao image view + gesture");
             gOverlayImageView = [[UIImageView alloc] initWithFrame:centeredFrameForImage(image)];
             configureRawImageView(gOverlayImageView);
             attachGestures(gOverlayImageView);
             [gOverlayRoot addSubview:gOverlayImageView];
+            doReset = YES;  // view vừa tạo -> luôn căn giữa theo ảnh
         }
         updateExpandedPinchGesture();
         ensureScaleLockControls();
 
         gOverlayImageView.image = rendersOverlayImage() ? image : nil;
-        if (CGRectIsEmpty(gOverlayImageView.frame) || gOverlayImageView.frame.size.width < 2 || gOverlayImageView.frame.size.height < 2) {
+
+        if (doReset) {
+            // Ảnh mới: huỷ mọi toggle dim đang chờ, thoát viền xanh, căn giữa lại
+            // theo kích thước ảnh mới, rồi GHI ĐÈ state cũ. KHÔNG đọc lại state.plist
+            // (nếu không sẽ dính lại frame/scale-lock của ảnh trước).
+            gToggleGeneration++;
+            if (gScaleLockModeEnabled) {
+                applyScaleLockMode(NO);
+            }
+            gScaleLockModeEnabled = NO;
+            gOverlayVisible = YES;
+            gOverlayDimmed = NO;
+            gOverlayImageView.transform = CGAffineTransformIdentity;
             gOverlayImageView.frame = centeredFrameForImage(image);
+            gOverlayImageView.hidden = NO;
+            gOverlayImageView.layer.borderWidth = 0;
+            gOverlayImageView.layer.borderColor = nil;
+            applyOverlayAlpha();
+            updateScaleLockControlsVisibility();
+            refreshOverlayWindowVisibility();
+            persistOverlayState(YES);
+            overlayLog(@"Overlay ANH MOI (reset frame) %.0fx%.0f", image.size.width, image.size.height);
+        } else {
+            if (CGRectIsEmpty(gOverlayImageView.frame) || gOverlayImageView.frame.size.width < 2 || gOverlayImageView.frame.size.height < 2) {
+                gOverlayImageView.frame = centeredFrameForImage(image);
+            }
+            gOverlayImageView.hidden = NO;
+            applyOverlayAlpha();
+            gOverlayVisible = YES;
+            applyOverlayStateFromDisk();
+            refreshOverlayWindowVisibility();
+            persistOverlayState(NO);
         }
 
-        gOverlayImageView.hidden = NO;
-        applyOverlayAlpha();
-        gOverlayVisible = YES;
-        applyOverlayStateFromDisk();
-        refreshOverlayWindowVisibility();
-        persistOverlayState(NO);
         overlayLog(@"Overlay HIEN %.0fx%.0f windowHidden=%d rootHidden=%d",
                    image.size.width, image.size.height,
                    gOverlayWindow.hidden, gOverlayRoot.hidden);
@@ -1331,7 +1360,7 @@ static void showOverlayImage(UIImage *image) {
     });
 }
 
-static void loadAndShowPublishedOverlay(void) {
+static void loadAndShowPublishedOverlay(BOOL resetFrame) {
     UIImage *image = overlayImageFromPasteboard();
     if (!image) {
         image = overlayImageFromSharedFile();
@@ -1342,8 +1371,8 @@ static void loadAndShowPublishedOverlay(void) {
         return;
     }
 
-    overlayLog(@"loadAndShowPublishedOverlay: doc duoc anh %.0fx%.0f", image.size.width, image.size.height);
-    showOverlayImage(image);
+    overlayLog(@"loadAndShowPublishedOverlay: doc duoc anh %.0fx%.0f reset=%d", image.size.width, image.size.height, resetFrame);
+    showOverlayImage(image, resetFrame);
 }
 
 static void removeOverlay(void) {
@@ -1552,8 +1581,8 @@ static void registerOverlayNotification(void) {
     }
 
     notify_register_dispatch(kOverlayUpdatedNotification, &gNotifyToken, dispatch_get_main_queue(), ^(__unused int token) {
-        overlayLog(@"Nhan notification 'image-updated' -> tai & hien anh");
-        loadAndShowPublishedOverlay();
+        overlayLog(@"Nhan notification 'image-updated' -> tai & hien anh (reset frame)");
+        loadAndShowPublishedOverlay(YES);
     });
 
     notify_register_dispatch(kOverlayRemoveNotification, &gRemoveToken, dispatch_get_main_queue(), ^(__unused int token) {
@@ -1592,7 +1621,7 @@ static void registerOverlayNotification(void) {
 
     notify_register_dispatch(kOverlayStateNotification, &gStateToken, dispatch_get_main_queue(), ^(__unused int token) {
         if (!gOverlayImageView) {
-            loadAndShowPublishedOverlay();
+            loadAndShowPublishedOverlay(NO);
             return;
         }
         applyOverlayStateFromDisk();
@@ -1625,7 +1654,7 @@ static void activateOverlayHost(void) {
         image = overlayImageFromSharedFile();  // fallback (chỉ chạy được nơi đọc được file)
     }
     if (image) {
-        showOverlayImage(image);
+        showOverlayImage(image, NO);
         reportAppStatus(@"img-ok");
     } else {
         reportAppStatus(@"no-img");
