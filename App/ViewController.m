@@ -27,6 +27,7 @@ static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.se
 @property (nonatomic, strong) UILabel *dimOpacityValueLabel;
 @property (nonatomic, strong) UILabel *dimAnimationValueLabel;
 @property (nonatomic, assign) int settingsNotifyToken;
+@property (nonatomic, strong) UIImageView *appOverlayView;
 @end
 
 @implementation ViewController
@@ -427,7 +428,67 @@ static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.se
     }
 
     notify_post(kOverlayUpdatedNotification);
+    [self showAppOverlay];
     self.statusLabel.text = @"Da gui anh den overlay";
+}
+
+- (UIWindow *)appKeyWindow {
+    UIWindow *win = self.view.window;
+    if (win) return win;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            if (w.isKeyWindow) return w;
+        }
+        UIWindow *any = ((UIWindowScene *)scene).windows.firstObject;
+        if (any) return any;
+    }
+    return nil;
+}
+
+- (void)showAppOverlay {
+    if (!self.selectedImage) return;
+    UIWindow *win = [self appKeyWindow];
+    if (!win) return;
+
+    if (!self.appOverlayView) {
+        self.appOverlayView = [UIImageView new];
+        self.appOverlayView.userInteractionEnabled = YES;
+        self.appOverlayView.contentMode = UIViewContentModeScaleAspectFit;
+        [self.appOverlayView addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleAppOverlayPan:)]];
+        [self.appOverlayView addGestureRecognizer:[[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handleAppOverlayPinch:)]];
+    }
+    self.appOverlayView.image = self.selectedImage;
+
+    CGSize imgSize = self.selectedImage.size;
+    CGFloat scale = 1.0;
+    if (imgSize.width > 0 && imgSize.height > 0) {
+        scale = MIN(win.bounds.size.width * 0.6 / imgSize.width, win.bounds.size.height * 0.6 / imgSize.height);
+        scale = MIN(MAX(scale, 0.05), 1.0);
+    }
+    CGSize shown = CGSizeMake(imgSize.width * scale, imgSize.height * scale);
+    if (shown.width < 40) shown = CGSizeMake(160, 160);
+    self.appOverlayView.frame = CGRectMake((win.bounds.size.width - shown.width) / 2.0,
+                                           (win.bounds.size.height - shown.height) / 2.0,
+                                           shown.width, shown.height);
+    [win addSubview:self.appOverlayView];
+    [win bringSubviewToFront:self.appOverlayView];
+}
+
+- (void)handleAppOverlayPan:(UIPanGestureRecognizer *)g {
+    UIView *v = g.view;
+    CGPoint t = [g translationInView:v.superview];
+    v.center = CGPointMake(v.center.x + t.x, v.center.y + t.y);
+    [g setTranslation:CGPointZero inView:v.superview];
+}
+
+- (void)handleAppOverlayPinch:(UIPinchGestureRecognizer *)g {
+    UIView *v = g.view;
+    CGSize ns = CGSizeMake(v.bounds.size.width * g.scale, v.bounds.size.height * g.scale);
+    if (ns.width >= 30 && ns.height >= 30) {
+        v.bounds = CGRectMake(0, 0, ns.width, ns.height);
+    }
+    g.scale = 1.0;
 }
 
 - (void)clearPublishedImage {
@@ -438,6 +499,8 @@ static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.se
 
 - (void)deleteImageTapped {
     [self clearPublishedImage];
+    [self.appOverlayView removeFromSuperview];
+    self.appOverlayView = nil;
     self.selectedImage = nil;
     self.selectedImageData = nil;
     [self updateState];
