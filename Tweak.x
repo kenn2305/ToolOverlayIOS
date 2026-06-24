@@ -55,8 +55,9 @@ static CFTimeInterval gLastRealtimeStateSync = 0;
 static int gRealtimeClientSocket = -1;
 static CFSocketRef gRealtimeServerSocket = NULL;
 static CFRunLoopSourceRef gRealtimeServerSource = NULL;
-static UIWindow *gOverlayWindow = nil;
-static __weak UIWindow *gPreviousKeyWindow = nil;
+static __weak UIWindow *gOverlayHostWindow = nil;
+@class OverlayPassthroughView;
+static OverlayPassthroughView *gOverlayRoot = nil;
 static UIImageView *gOverlayImageView = nil;
 static UIControl *gQuickActionsBackdrop = nil;
 static UIView *gQuickActionsPanel = nil;
@@ -101,57 +102,57 @@ typedef struct __attribute__((packed)) {
     uint8_t scaleLock;
 } OverlayRealtimeMessage;
 
-@interface OverlayPassthroughWindow : UIWindow
+@interface OverlayPassthroughView : UIView
 @end
 
 static CGRect expandedScaleHitboxInRootView(void);
 static void refreshOverlayWindowVisibility(void);
 static void updateScaleLockControlsVisibility(void);
 static void updateOverlayControlValues(void);
-static void attachOverlayWindowScene(void);
+static UIWindowScene *foregroundOverlayScene(void);
+static UIWindow *keyWindowForScene(UIWindowScene *scene);
 
-@implementation OverlayPassthroughWindow
+@implementation OverlayPassthroughView
 
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hitView = [super hitTest:point withEvent:event];
-    UIView *rootView = self.rootViewController.view;
+    // Trong UIView subclass, "rootView" chính là container này (self).
 
-    if (gQuickActionsVisible && rootView) {
-        return hitView ?: rootView;
+    if (gQuickActionsVisible) {
+        return hitView ?: self;
     }
 
     if (gScaleLockModeEnabled) {
         if (gScaleLockControlsPanel && !gScaleLockControlsPanel.hidden && [hitView isDescendantOfView:gScaleLockControlsPanel]) {
             return hitView;
         }
-        if (CGRectContainsPoint(self.bounds, point) && rootView) {
-            if (!hitView || hitView == self || hitView == rootView) {
-                return rootView;
+        if (CGRectContainsPoint(self.bounds, point)) {
+            if (!hitView || hitView == self) {
+                return self;
             }
             return hitView;
         }
         if (!hitView || hitView == self) {
-            return rootView;
+            return self;
         }
         return hitView;
     }
 
-    if (gOverlayImageView && gOverlayVisible && !gOverlayImageView.hidden && rootView) {
-        CGPoint rootPoint = [rootView convertPoint:point fromView:self];
-        CGPoint imagePoint = [gOverlayImageView convertPoint:rootPoint fromView:rootView];
+    if (gOverlayImageView && gOverlayVisible && !gOverlayImageView.hidden) {
+        CGPoint imagePoint = [gOverlayImageView convertPoint:point fromView:self];
         if ([gOverlayImageView pointInside:imagePoint withEvent:event]) {
             return gOverlayImageView;
         }
     }
 
-    if ((hitView == self || hitView == rootView) && event.allTouches.count >= 2 && rootView) {
-        CGPoint rootPoint = [rootView convertPoint:point fromView:self];
-        if (CGRectContainsPoint(expandedScaleHitboxInRootView(), rootPoint)) {
-            return rootView;
+    if (hitView == self && event.allTouches.count >= 2) {
+        if (CGRectContainsPoint(expandedScaleHitboxInRootView(), point)) {
+            return self;
         }
     }
 
-    if (hitView == self || hitView == self.rootViewController.view) {
+    if (hitView == self) {
+        // Vùng trống của container -> để touch xuyên xuống app bên dưới.
         return nil;
     }
     return hitView;
@@ -163,15 +164,6 @@ static void attachOverlayWindowScene(void);
 @end
 
 static OverlayGestureHandler *gGestureHandler = nil;
-
-static UIWindow *currentKeyWindowExcludingOverlay(void) {
-    for (UIWindow *window in UIApplication.sharedApplication.windows.reverseObjectEnumerator) {
-        if (window != gOverlayWindow && window.isKeyWindow) {
-            return window;
-        }
-    }
-    return nil;
-}
 
 static BOOL shouldEnableOverlayInCurrentProcess(void) {
     NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
@@ -477,13 +469,11 @@ static CGRect centeredFrameForImage(UIImage *image) {
 }
 
 static void configureRawImageView(UIImageView *imageView) {
-    // [DEBUG 5.8.7] Nền đỏ + viền vàng để thấy cửa sổ render dù ảnh chưa tải được.
-    imageView.backgroundColor = [UIColor colorWithRed:1.0 green:0.0 blue:0.0 alpha:0.45];
+    imageView.backgroundColor = UIColor.clearColor;
     imageView.contentMode = UIViewContentModeScaleAspectFit;
     imageView.userInteractionEnabled = YES;
     imageView.clipsToBounds = YES;
-    imageView.layer.borderWidth = 4;
-    imageView.layer.borderColor = UIColor.yellowColor.CGColor;
+    imageView.layer.borderWidth = 0;
     imageView.layer.shadowOpacity = 0;
     imageView.layer.shadowRadius = 0;
     imageView.layer.shadowOffset = CGSizeZero;
@@ -523,26 +513,36 @@ static BOOL rendersOverlayImage(void) {
     return gOverlayProcessEnabled;
 }
 
-static CGFloat overlayWindowLevel(void) {
-    return UIWindowLevelAlert + 100000.0;
-}
+static void ensureOverlayRoot(void);
 
 static void refreshOverlayWindowVisibility(void) {
-    if (!gOverlayWindow) {
+    if (!gOverlayRoot) {
         return;
     }
 
-    attachOverlayWindowScene();
+    // Nếu host window không còn (hoặc không còn là key window của scene foreground)
+    // -> tái-gắn gOverlayRoot vào key window hiện tại để bám theo app đang foreground.
+    UIWindowScene *scene = foregroundOverlayScene();
+    UIWindow *currentKey = keyWindowForScene(scene);
+    if (currentKey && currentKey != gOverlayHostWindow) {
+        gOverlayHostWindow = currentKey;
+        gOverlayRoot.frame = currentKey.bounds;
+        [currentKey addSubview:gOverlayRoot];
+    }
 
-    // Khi khoá/tắt màn hình: chỉ ẩn cửa sổ, KHÔNG xoá ảnh/state.
+    // Khi khoá/tắt màn hình: chỉ ẩn container, KHÔNG xoá ảnh/state.
     BOOL lockHidden = gScreenBlanked || gScreenLocked || gDataUnavailable;
     BOOL baseHidden = !gOverlayVisible && !gScaleLockModeEnabled;
-    gOverlayWindow.hidden = lockHidden || baseHidden;
+    gOverlayRoot.hidden = lockHidden || baseHidden;
 
     if (rendersOverlayImage()) {
-        gOverlayWindow.userInteractionEnabled = YES;
+        gOverlayRoot.userInteractionEnabled = YES;
     } else {
-        gOverlayWindow.userInteractionEnabled = gOverlayVisible || gScaleLockModeEnabled;
+        gOverlayRoot.userInteractionEnabled = gOverlayVisible || gScaleLockModeEnabled;
+    }
+
+    if (!gOverlayRoot.hidden && gOverlayHostWindow) {
+        [gOverlayHostWindow bringSubviewToFront:gOverlayRoot];
     }
 }
 
@@ -598,7 +598,7 @@ static UIButton *quickActionsButton(NSString *title, SEL action) {
 }
 
 static void showOverlayQuickActions(void) {
-    if (gScaleLockModeEnabled || gQuickActionsVisible || !gOverlayWindow || !gOverlayWindow.rootViewController) {
+    if (gScaleLockModeEnabled || gQuickActionsVisible || !gOverlayRoot) {
         return;
     }
 
@@ -606,10 +606,11 @@ static void showOverlayQuickActions(void) {
         gGestureHandler = [OverlayGestureHandler new];
     }
 
-    UIView *rootView = gOverlayWindow.rootViewController.view;
+    UIView *rootView = gOverlayRoot;
     CGRect bounds = rootView.bounds;
     CGFloat margin = 12.0;
-    CGFloat safeBottom = MAX(gOverlayWindow.safeAreaInsets.bottom, 10.0);
+    CGFloat hostSafeBottom = gOverlayHostWindow ? gOverlayHostWindow.safeAreaInsets.bottom : gOverlayRoot.safeAreaInsets.bottom;
+    CGFloat safeBottom = MAX(hostSafeBottom, 10.0);
     CGFloat cancelHeight = 64.0;
     CGFloat panelHeight = 274.0;
     CGFloat panelWidth = bounds.size.width - margin * 2.0;
@@ -722,40 +723,45 @@ static UIWindowScene *foregroundOverlayScene(void) {
     return active ?: fallback;
 }
 
-static void attachOverlayWindowScene(void) {
-    if (!gOverlayWindow) {
-        return;
+// iOS 14-compatible: UIWindowScene.keyWindow chỉ có từ iOS 15, nên tự tìm
+// trong scene.windows cửa sổ key, fallback về cửa sổ đầu tiên.
+static UIWindow *keyWindowForScene(UIWindowScene *scene) {
+    if (!scene) {
+        return nil;
     }
-    UIWindowScene *target = foregroundOverlayScene();
-    if (target && gOverlayWindow.windowScene != target) {
-        gOverlayWindow.windowScene = target;
+    for (UIWindow *window in scene.windows) {
+        if (window.isKeyWindow) {
+            return window;
+        }
     }
+    return scene.windows.firstObject;
 }
 
-static void ensureOverlayWindow(void) {
-    if (gOverlayWindow || !gOverlayHostReady) {
+static void ensureOverlayRoot(void) {
+    if (gOverlayRoot || !gOverlayHostReady) {
         return;
     }
 
-    // QUAN TRỌNG (iOS 15): tạo cửa sổ GẮN THẲNG vào scene bằng initWithWindowScene.
-    // Cách cũ initWithFrame rồi set .windowScene KHÔNG render trên iOS 15.
+    // iOS 15: KHÔNG tạo UIWindow riêng (không render trên app foreground). Thay vào đó
+    // gắn 1 container UIView full-screen passthrough vào key window đang có của tiến trình.
     UIWindowScene *scene = foregroundOverlayScene();
     if (!scene) {
         return;  // chưa có scene active -> đợi tiến trình thành foreground rồi tạo
     }
 
-    gOverlayWindow = [[OverlayPassthroughWindow alloc] initWithWindowScene:scene];
-    gOverlayWindow.frame = scene.coordinateSpace.bounds;
-    gOverlayWindow.windowLevel = overlayWindowLevel();
-    gOverlayWindow.backgroundColor = UIColor.clearColor;
-    gOverlayWindow.opaque = NO;
-    gOverlayWindow.clipsToBounds = NO;
+    UIWindow *hostWindow = keyWindowForScene(scene);
+    if (!hostWindow) {
+        return;  // chưa có key window -> đợi foreground
+    }
 
-    UIViewController *rootViewController = [UIViewController new];
-    rootViewController.view.backgroundColor = UIColor.clearColor;
-    rootViewController.view.userInteractionEnabled = YES;
-    gOverlayWindow.rootViewController = rootViewController;
-    gOverlayWindow.hidden = NO;
+    gOverlayHostWindow = hostWindow;
+
+    gOverlayRoot = [[OverlayPassthroughView alloc] initWithFrame:hostWindow.bounds];
+    gOverlayRoot.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    gOverlayRoot.backgroundColor = UIColor.clearColor;
+    gOverlayRoot.userInteractionEnabled = YES;
+    [hostWindow addSubview:gOverlayRoot];
+    [hostWindow bringSubviewToFront:gOverlayRoot];
 }
 
 static void applyScaleLockMode(BOOL enabled);
@@ -807,11 +813,11 @@ static void applyOverlayStateFromDisk(void) {
 }
 
 static CGRect expandedScaleHitboxInRootView(void) {
-    if (!gOverlayImageView || !gOverlayWindow) {
+    if (!gOverlayImageView || !gOverlayRoot) {
         return CGRectNull;
     }
 
-    UIView *rootView = gOverlayWindow.rootViewController.view;
+    UIView *rootView = gOverlayRoot;
     CGRect imageFrame = [gOverlayImageView.superview convertRect:gOverlayImageView.frame toView:rootView];
     CGFloat inflateX = MAX(imageFrame.size.width * 25.0, 240.0);
     CGFloat inflateY = MAX(imageFrame.size.height * 25.0, 240.0);
@@ -819,11 +825,11 @@ static CGRect expandedScaleHitboxInRootView(void) {
 }
 
 static void updateExpandedPinchGesture(void) {
-    if (!gOverlayWindow || !gGestureHandler) {
+    if (!gOverlayRoot || !gGestureHandler) {
         return;
     }
 
-    UIView *rootView = gOverlayWindow.rootViewController.view;
+    UIView *rootView = gOverlayRoot;
     if (!gExpandedPinchGesture) {
         gExpandedPinchGesture = [[UIPinchGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleExpandedPinch:)];
         gExpandedPinchGesture.cancelsTouchesInView = YES;
@@ -908,11 +914,11 @@ static void updateScaleLockControlsVisibility(void) {
     gScaleLockControlsPanel.alpha = rendersOverlayImage() ? 1.0 : 0.02;
 }
 
-static BOOL pointInsideScaleLockControls(CGPoint pointInWindow) {
-    if (!gScaleLockControlsPanel || gScaleLockControlsPanel.hidden || !gOverlayWindow) {
+static BOOL pointInsideScaleLockControls(CGPoint pointInRoot) {
+    if (!gScaleLockControlsPanel || gScaleLockControlsPanel.hidden || !gOverlayRoot) {
         return NO;
     }
-    CGPoint point = [gScaleLockControlsPanel convertPoint:pointInWindow fromView:gOverlayWindow];
+    CGPoint point = [gScaleLockControlsPanel convertPoint:pointInRoot fromView:gOverlayRoot];
     return [gScaleLockControlsPanel pointInside:point withEvent:nil];
 }
 
@@ -995,7 +1001,7 @@ static void hideImageFromPanelTapped(__unused UIButton *button) {
 static OverlayControlTarget *gOverlayControlTarget = nil;
 
 static void ensureScaleLockControls(void) {
-    if (!gOverlayWindow || gScaleLockControlsPanel) {
+    if (!gOverlayRoot || gScaleLockControlsPanel) {
         return;
     }
 
@@ -1003,9 +1009,9 @@ static void ensureScaleLockControls(void) {
         gOverlayControlTarget = [OverlayControlTarget new];
     }
 
-    UIView *rootView = gOverlayWindow.rootViewController.view;
+    UIView *rootView = gOverlayRoot;
     CGRect bounds = rootView.bounds;
-    CGFloat safeBottom = gOverlayWindow.safeAreaInsets.bottom;
+    CGFloat safeBottom = gOverlayHostWindow ? gOverlayHostWindow.safeAreaInsets.bottom : gOverlayRoot.safeAreaInsets.bottom;
     CGFloat panelHeight = 328.0;
     CGFloat margin = 12.0;
     gScaleLockControlsPanel = [[UIView alloc] initWithFrame:CGRectMake(margin,
@@ -1129,8 +1135,8 @@ static void showOverlayImage(UIImage *image) {
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
-        ensureOverlayWindow();
-        if (!gOverlayWindow) {
+        ensureOverlayRoot();
+        if (!gOverlayRoot) {
             return;
         }
 
@@ -1138,7 +1144,7 @@ static void showOverlayImage(UIImage *image) {
             gOverlayImageView = [[UIImageView alloc] initWithFrame:centeredFrameForImage(image)];
             configureRawImageView(gOverlayImageView);
             attachGestures(gOverlayImageView);
-            [gOverlayWindow.rootViewController.view addSubview:gOverlayImageView];
+            [gOverlayRoot addSubview:gOverlayImageView];
         }
         updateExpandedPinchGesture();
         ensureScaleLockControls();
@@ -1186,9 +1192,16 @@ static void removeOverlay(void) {
             gOverlayImageView = nil;
         }
 
-        if (gOverlayWindow) {
-            gOverlayWindow.hidden = YES;
+        if (gScaleLockControlsPanel) {
+            [gScaleLockControlsPanel removeFromSuperview];
+            gScaleLockControlsPanel = nil;
         }
+
+        if (gOverlayRoot) {
+            [gOverlayRoot removeFromSuperview];
+            gOverlayRoot = nil;
+        }
+        gOverlayHostWindow = nil;
 
         gOverlayVisible = NO;
         NSLog(@"[OverlayIOSTOOL] Overlay removed");
@@ -1284,28 +1297,20 @@ static void applyScaleLockMode(BOOL enabled) {
     if (enabled) {
         gOverlayVisible = YES;
         gOverlayDimmed = NO;
-        gOverlayWindow.frame = UIScreen.mainScreen.bounds;
-        gOverlayWindow.windowLevel = overlayWindowLevel();
-        gOverlayWindow.userInteractionEnabled = YES;
-        gOverlayWindow.rootViewController.view.userInteractionEnabled = YES;
-        gOverlayWindow.hidden = NO;
-        if (!gOverlayWindow.isKeyWindow) {
-            gPreviousKeyWindow = currentKeyWindowExcludingOverlay();
-            [gOverlayWindow makeKeyAndVisible];
+        // Toàn-màn-hình capture được đảm bảo bởi hitTest của container trả về root
+        // khi gScaleLockModeEnabled -> không cần đụng tới key window.
+        gOverlayRoot.userInteractionEnabled = YES;
+        gOverlayRoot.hidden = NO;
+        if (gOverlayHostWindow) {
+            [gOverlayHostWindow bringSubviewToFront:gOverlayRoot];
         }
         gOverlayImageView.hidden = NO;
         applyOverlayAlpha();
         gOverlayImageView.layer.borderWidth = rendersOverlayImage() ? 3.0 : 0.0;
         gOverlayImageView.layer.borderColor = rendersOverlayImage() ? UIColor.systemBlueColor.CGColor : nil;
     } else {
-        gOverlayWindow.windowLevel = overlayWindowLevel();
         gOverlayImageView.layer.borderWidth = 0;
         gOverlayImageView.layer.borderColor = nil;
-        [gOverlayWindow resignKeyWindow];
-        if (gPreviousKeyWindow) {
-            [gPreviousKeyWindow makeKeyWindow];
-        }
-        gPreviousKeyWindow = nil;
     }
 
     refreshOverlayWindowVisibility();
@@ -1331,23 +1336,21 @@ static void __attribute__((unused)) scheduleToggleOverlayVisibility(void) {
     });
 }
 
-static BOOL pointInsideOverlayImage(CGPoint pointInWindow) {
+static BOOL pointInsideOverlayImage(CGPoint pointInRoot) {
     if (!gOverlayImageView || gOverlayImageView.hidden || !gOverlayVisible) {
         return NO;
     }
 
-    CGPoint point = [gOverlayImageView convertPoint:pointInWindow fromView:gOverlayWindow];
+    CGPoint point = [gOverlayImageView convertPoint:pointInRoot fromView:gOverlayRoot];
     return [gOverlayImageView pointInside:point withEvent:nil];
 }
 
 static BOOL touchInsideOverlayImage(UITouch *touch) {
-    if (!touch || !gOverlayWindow || !gOverlayImageView) {
+    if (!touch || !gOverlayRoot || !gOverlayImageView) {
         return NO;
     }
 
-    UIWindow *sourceWindow = touch.window;
-    CGPoint sourcePoint = [touch locationInView:sourceWindow];
-    CGPoint overlayPoint = sourceWindow ? [gOverlayWindow convertPoint:sourcePoint fromWindow:sourceWindow] : [touch locationInView:gOverlayWindow];
+    CGPoint overlayPoint = [touch locationInView:gOverlayRoot];
     return pointInsideOverlayImage(overlayPoint);
 }
 
@@ -1432,8 +1435,7 @@ static void activateOverlayHost(void) {
     if (hasPublishedImage) {
         loadAndShowPublishedOverlay();
     } else if (gOverlayImageView) {
-        // overlay đã tạo từ trước -> chỉ gắn lại scene của tiến trình foreground hiện tại.
-        attachOverlayWindowScene();
+        // overlay đã tạo từ trước -> tái-gắn container vào key window foreground hiện tại.
         refreshOverlayWindowVisibility();
     }
 }
@@ -1517,7 +1519,7 @@ static void activateOverlayHost(void) {
         return;
     }
 
-    UIView *rootView = gOverlayWindow.rootViewController.view;
+    UIView *rootView = gOverlayRoot;
     if (!gScaleLockModeEnabled) {
         CGPoint firstPoint = [gesture locationOfTouch:0 inView:rootView];
         CGPoint secondPoint = [gesture locationOfTouch:1 inView:rootView];
@@ -1544,11 +1546,11 @@ static void activateOverlayHost(void) {
 
 - (void)handleRelativePan:(UIPanGestureRecognizer *)gesture {
     if (!gScaleLockModeEnabled || !gOverlayImageView) {
-        [gesture setTranslation:CGPointZero inView:gOverlayWindow.rootViewController.view];
+        [gesture setTranslation:CGPointZero inView:gOverlayRoot];
         return;
     }
 
-    UIView *rootView = gOverlayWindow.rootViewController.view;
+    UIView *rootView = gOverlayRoot;
     if (gesture.state == UIGestureRecognizerStateEnded ||
         gesture.state == UIGestureRecognizerStateCancelled ||
         gesture.state == UIGestureRecognizerStateFailed) {
@@ -1575,8 +1577,8 @@ static void activateOverlayHost(void) {
         return NO;
     }
 
-    if (gScaleLockModeEnabled && gOverlayWindow) {
-        CGPoint point = [touch locationInView:gOverlayWindow];
+    if (gScaleLockModeEnabled && gOverlayRoot) {
+        CGPoint point = [touch locationInView:gOverlayRoot];
         if (pointInsideScaleLockControls(point)) {
             return NO;
         }
@@ -1626,8 +1628,7 @@ static void activateOverlayHost(void) {
     if (event.type == UIEventTypeTouches && gScaleLockModeEnabled && gOverlayImageView) {
         BOOL overlayTouch = NO;
         for (UITouch *touch in event.allTouches) {
-            UIWindow *touchWindow = touch.window;
-            if (touchWindow == gOverlayWindow || [touch.view isDescendantOfView:gOverlayWindow]) {
+            if (gOverlayRoot && (touch.view == gOverlayRoot || [touch.view isDescendantOfView:gOverlayRoot])) {
                 overlayTouch = YES;
                 break;
             }
