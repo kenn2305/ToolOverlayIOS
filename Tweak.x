@@ -186,9 +186,7 @@ static BOOL shouldEnableOverlayInCurrentProcess(void) {
         return YES;
     }
 
-    if ([bundleIdentifier hasPrefix:@"com.vietanh.overlayiostool"]) {
-        return NO;
-    }
+    // Cho phép overlay hiện NGAY trong chính app tool (foreground + đã có ảnh) -> thấy liền.
 
     if ([bundlePath containsString:@".appex"] || [executablePath containsString:@"/PlugIns/"]) {
         return NO;
