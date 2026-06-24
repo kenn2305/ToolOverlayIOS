@@ -168,16 +168,15 @@ LIPO="$THEOS_DIR/toolchain/linux/iphone/bin/lipo"
 if [ -x "$LIPO" ] && [ -f "$MERGED" ]; then
     ARCHS_OUT="$("$LIPO" -info "$MERGED" 2>/dev/null || true)"
     log "$ARCHS_OUT"
-    echo "$ARCHS_OUT" | grep -q "arm64e" || die "dylib THIẾU arm64e."
     echo "$ARCHS_OUT" | grep -qw "arm64"  || die "dylib THIẾU arm64."
-    ok "dylib đủ arm64 + arm64e (mọi chip A8+)"
+    ok "dylib arm64 (chạy mọi chip A8+; A12+ qua ElleKit, tránh lỗi PAC arm64e)"
 fi
 
 VER="$(grep -i '^Version:' "$PROJECT_DIR/control" | awk '{print $2}')"
 [ -n "$VER" ] || VER="dev"
 mkdir -p "$PROJECT_DIR/packages"
-ROOTLESS_OUT="$PROJECT_DIR/packages/OverlayIOSTOOL_${VER}_rootless_arm64-arm64e.deb"
-ROOTFUL_OUT="$PROJECT_DIR/packages/OverlayIOSTOOL_${VER}_rootful_arm64-arm64e.deb"
+ROOTLESS_OUT="$PROJECT_DIR/packages/OverlayIOSTOOL_${VER}_rootless_arm64.deb"
+ROOTFUL_OUT="$PROJECT_DIR/packages/OverlayIOSTOOL_${VER}_rootful_arm64.deb"
 cp -f "$ROOTLESS_DEB" "$ROOTLESS_OUT"
 cp -f "$ROOTFUL_DEB" "$ROOTFUL_OUT"
 
