@@ -121,7 +121,6 @@ typedef struct __attribute__((packed)) {
 @interface OverlayPassthroughView : UIView
 @end
 
-static CGRect __attribute__((unused)) expandedScaleHitboxInRootView(void);
 static void refreshOverlayWindowVisibility(void);
 static void updateScaleLockControlsVisibility(void);
 static void updateOverlayControlValues(void);
@@ -188,13 +187,10 @@ static void overlayLog(NSString *format, ...) {
         return hitView;
     }
 
-    // 2 NGÓN ở BẤT KỲ đâu trên màn hình -> dồn HẾT về root để pinch zoom (kể cả ngoài
-    // ảnh). Hai ngón chạm gần như cùng lúc nằm chung một event nên cùng được route về
-    // root -> recognizer đủ 2 touch -> zoom được mọi vị trí. 1 ngón vẫn xử lý như cũ.
-    if (gOverlayImageView && !gOverlayImageView.hidden && event.allTouches.count >= 2) {
-        return self;
-    }
-
+    // KHÔNG viền xanh: chỉ nhận chạm khi NGÓN nằm TRÊN ảnh (2 ngón trong ảnh -> zoom;
+    // 1 ngón trong ảnh -> di chuyển / long-press / tap). Chạm NGOÀI ảnh -> xuyên xuống
+    // app bên dưới (app vẫn bấm được, toggle-click chạy). Muốn zoom ở chế độ thường thì
+    // cả 2 ngón phải đặt trong ảnh.
     if (gOverlayImageView && gOverlayVisible && !gOverlayImageView.hidden) {
         CGPoint imagePoint = [gOverlayImageView convertPoint:point fromView:self];
         if ([gOverlayImageView pointInside:imagePoint withEvent:event]) {
@@ -203,7 +199,7 @@ static void overlayLog(NSString *format, ...) {
     }
 
     if (hitView == self) {
-        // Vùng trống của container -> để touch (1 ngón) xuyên xuống app bên dưới.
+        // Vùng trống của container -> để touch xuyên xuống app bên dưới.
         return nil;
     }
     return hitView;
@@ -972,18 +968,6 @@ static void applyOverlayStateFromDisk(void) {
     refreshOverlayWindowVisibility();
 
     gApplyingRemoteState = NO;
-}
-
-static CGRect expandedScaleHitboxInRootView(void) {
-    if (!gOverlayImageView || !gOverlayRoot) {
-        return CGRectNull;
-    }
-
-    UIView *rootView = gOverlayRoot;
-    CGRect imageFrame = [gOverlayImageView.superview convertRect:gOverlayImageView.frame toView:rootView];
-    CGFloat inflateX = MAX(imageFrame.size.width * 25.0, 240.0);
-    CGFloat inflateY = MAX(imageFrame.size.height * 25.0, 240.0);
-    return CGRectInset(imageFrame, -inflateX, -inflateY);
 }
 
 static void updateExpandedPinchGesture(void) {
