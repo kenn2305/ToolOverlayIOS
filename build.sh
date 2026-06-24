@@ -64,37 +64,34 @@ fi
 ok "Theos"
 
 # ----------------------------------------------------
-# 4. iOS toolchain THẬT (arm64e). KHÔNG fallback wrapper.
+# 4. iOS toolchain THẬT (clang 13, ABI arm64e MỚI cho iOS 14+).
+#    PHẢI dùng toolchain clang >= 12. Toolchain cũ (CRKatri swift-5.3.2 = clang 11)
+#    sinh arm64e ABI CŨ -> PAC crash treo táo trên iOS 14.2+/15. kabiroberai
+#    swift-5.8 (clang 13) sinh arm64e ABI mới đúng chuẩn.
 # ----------------------------------------------------
-log "[4/8] iOS toolchain (arm64e)..."
+log "[4/8] iOS toolchain (clang 13, arm64e ABI mới)..."
 TC_BIN="$THEOS_DIR/toolchain/linux/iphone/bin/clang"
+# Nếu đang có toolchain CŨ (clang < 12) -> xoá để tải lại bản mới (tránh PAC crash).
+if [ -x "$TC_BIN" ]; then
+    TC_VER="$("$TC_BIN" --version 2>/dev/null | grep -oiE 'clang version [0-9]+' | grep -oE '[0-9]+' | head -1 || echo 0)"
+    if [ "${TC_VER:-0}" -lt 12 ]; then
+        log "  -> phát hiện toolchain cũ (clang ${TC_VER}) -> xoá, tải bản clang 13"
+        rm -rf "$THEOS_DIR/toolchain/linux"
+    fi
+fi
 if [ ! -x "$TC_BIN" ]; then
-    mkdir -p "$THEOS_DIR/toolchain/linux/iphone"
     cd /tmp
-    URLS=(
-        "https://github.com/CRKatri/llvm-project/releases/download/swift-5.3.2-RELEASE/linux-ios-arm64e-clang-toolchain.tar.zst"
-        "https://github.com/sbingner/llvm-project/releases/latest/download/linux-ios-arm64e-clang-toolchain.tar.lzma"
-    )
-    for url in "${URLS[@]}"; do
-        log "  -> tải $(basename "$url")"
-        if curl -fsSL -o tc.archive "$url"; then
-            case "$url" in
-                *.tar.zst)  zstd -dq tc.archive -o tc.tar && tar -xf tc.tar -C "$THEOS_DIR/toolchain/linux/iphone"; rm -f tc.tar ;;
-                *.tar.lzma) unlzma -c tc.archive | tar -x -C "$THEOS_DIR/toolchain/linux/iphone" ;;
-            esac
-            rm -f tc.archive
-            # Một số bản giải nén ra thư mục con -> gom về đúng chỗ.
-            if [ ! -x "$TC_BIN" ]; then
-                found="$(find "$THEOS_DIR/toolchain/linux/iphone" -name clang -type f 2>/dev/null | head -1 || true)"
-                if [ -n "$found" ]; then
-                    base="$(cd "$(dirname "$found")/.." && pwd)"
-                    [ "$base" != "$THEOS_DIR/toolchain/linux/iphone" ] && cp -a "$base/." "$THEOS_DIR/toolchain/linux/iphone/" 2>/dev/null || true
-                fi
-            fi
-            [ -x "$TC_BIN" ] && break
-        fi
-    done
-    [ -x "$TC_BIN" ] || die "Không tải được iOS toolchain thật. KHÔNG dùng clang hệ thống (sẽ ra binary hỏng). Kiểm tra mạng rồi chạy lại."
+    # Tarball giải nén thẳng ra cấu trúc linux/iphone/... khớp Theos.
+    SWIFT_TC_URL="https://github.com/kabiroberai/swift-toolchain-linux/releases/download/v2.3.0/swift-5.8-ubuntu22.04.tar.xz"
+    log "  -> tải $(basename "$SWIFT_TC_URL") (~620MB)"
+    curl -fSL --retry 3 -o swift-tc.tar.xz "$SWIFT_TC_URL" \
+        || die "Không tải được Swift toolchain (clang 13). Kiểm tra mạng rồi chạy lại."
+    rm -rf "$THEOS_DIR/toolchain/linux"
+    mkdir -p "$THEOS_DIR/toolchain"
+    tar -xJf swift-tc.tar.xz -C "$THEOS_DIR/toolchain" \
+        || die "Giải nén Swift toolchain thất bại."
+    rm -f swift-tc.tar.xz
+    [ -x "$TC_BIN" ] || die "Toolchain tải về thiếu clang tại $TC_BIN."
     chown -R builder:builder "$THEOS_DIR/toolchain"
 fi
 # Chặn wrapper hỏng: clang thật là ELF (bắt đầu bằng 0x7F 'ELF'), wrapper là script '#!'.
@@ -231,14 +228,15 @@ resign_app_in_deb() {
 resign_app_in_deb "$ROOTLESS_DEB"
 resign_app_in_deb "$ROOTFUL_DEB"
 
-# dylib phải đủ arm64 + arm64e (mọi chip A8+).
+# Per-app: dylib CHỈ cần arm64 (nạp vào app App Store = arm64). KHÔNG có arm64e ->
+# không nạp vào SpringBoard -> không treo táo.
 MERGED="$BUILD_DIR/.theos/obj/OverlayIOSTOOL.dylib"
 LIPO="$THEOS_DIR/toolchain/linux/iphone/bin/lipo"
 if [ -x "$LIPO" ] && [ -f "$MERGED" ]; then
     ARCHS_OUT="$("$LIPO" -info "$MERGED" 2>/dev/null || true)"
     log "  -> $ARCHS_OUT"
-    echo "$ARCHS_OUT" | grep -qw "arm64"  || die "dylib THIẾU slice arm64."
-    ok "dylib arm64 (chạy mọi chip A8+; A12+ qua ElleKit, tránh lỗi PAC arm64e)"
+    echo "$ARCHS_OUT" | grep -qw "arm64"   || die "dylib THIẾU slice arm64."
+    ok "dylib arm64 (per-app, không đụng SpringBoard -> không treo)"
 fi
 
 VER="$(grep -i '^Version:' "$PROJECT_DIR/control" | awk '{print $2}')"

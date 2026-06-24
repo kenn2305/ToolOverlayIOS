@@ -16,22 +16,33 @@
 #import <sys/un.h>
 #import <unistd.h>
 #import <string.h>
+#import <stdio.h>
 
 static NSString * const kOverlayDirectory = @"/var/mobile/Library/OverlayIOSTOOL";
 static NSString * const kOverlayImagePath = @"/var/mobile/Library/OverlayIOSTOOL/overlay.png";
 static NSString * const kOverlaySettingsPath = @"/var/mobile/Library/OverlayIOSTOOL/settings.plist";
 static NSString * const kOverlayStatePath = @"/var/mobile/Library/OverlayIOSTOOL/state.plist";
-static NSString * const kSpringBoardGuardPath = @"/var/mobile/Library/OverlayIOSTOOL/springboard-guard.plist";
-static NSString * const kSpringBoardDisabledPath = @"/var/mobile/Library/OverlayIOSTOOL/disabled-after-crash";
 static NSString * const kOverlayPasteboardName = @"com.vietanh.overlayiostool.image";
+// Pasteboard "báo danh": mỗi app tweak chạy vào ghi 1 dòng "<bundleid> <status>"
+// -> app tool đọc để biết tweak ĐÃ vào app nào (chẩn đoán, không phải đoán mò).
+static NSString * const kOverlayActiveAppsPasteboard = @"com.vietanh.overlayiostool.active-apps";
 static const char *kOverlayUpdatedNotification = "com.vietanh.overlayiostool.image-updated";
 static const char *kOverlayRemoveNotification = "com.vietanh.overlayiostool.image-remove";
 static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.settings-updated";
 static const char *kOverlayStateNotification = "com.vietanh.overlayiostool.state-updated";
 static const char *kOverlayDepositActionNotification = "com.vietanh.overlayiostool.action.deposit";
 static const char *kOverlayWithdrawActionNotification = "com.vietanh.overlayiostool.action.withdraw";
+// Toggle-click xuyên app: app chỉ phát hiện chạm (ngoài ảnh) -> báo SpringBoard.
+static const char *kOverlayAppTouchNotification = "com.vietanh.overlayiostool.app-touch";
+// Kênh state (notify_set_state/get_state, không dính sandbox) để app biết có cần relay.
+static const char *kOverlayToggleActiveState = "com.vietanh.overlayiostool.toggle-active";
 static const char *kOverlayRealtimeSocketPath = "/var/mobile/Library/OverlayIOSTOOL/realtime.sock";
 static const uint32_t kOverlayRealtimeMagic = 0x4F495254;
+
+// Hằng số font-weight CỦA TA (không phải symbol import UIKit) — tránh PAC-crash khi
+// arm64e clang 11 truy cập hằng số import. Giá trị bằng đúng UIFontWeight* của Apple.
+static const CGFloat kOverlayFontWeightRegular = 0.0;     // = UIFontWeightRegular
+static const CGFloat kOverlayFontWeightSemibold = 0.3;    // = UIFontWeightSemibold
 
 static BOOL gOverlayHostReady = NO;
 static BOOL gToggleClickEnabled = NO;
@@ -41,6 +52,7 @@ static BOOL gScaleLockModeEnabled = NO;
 static BOOL gApplyingRemoteState = NO;
 static BOOL gIsSpringBoardProcess = NO;
 static BOOL gOverlayProcessEnabled = NO;
+static BOOL gAppTouchRelayEnabled = NO;
 static BOOL gObserversInstalled = NO;
 static BOOL gQuickActionsVisible = NO;
 static BOOL gScreenBlanked = NO;
@@ -56,6 +68,7 @@ static int gRealtimeClientSocket = -1;
 static CFSocketRef gRealtimeServerSocket = NULL;
 static CFRunLoopSourceRef gRealtimeServerSource = NULL;
 static __weak UIWindow *gOverlayHostWindow = nil;
+static UIWindow *gOverlayWindow = nil;
 @class OverlayPassthroughView;
 static OverlayPassthroughView *gOverlayRoot = nil;
 static UIImageView *gOverlayImageView = nil;
@@ -86,6 +99,9 @@ static int gSettingsToken = 0;
 static int gStateToken = 0;
 static int gBlankedScreenToken = 0;
 static int gLockStateToken = 0;
+static int gAppTouchToken = 0;          // SpringBoard: nhận tín hiệu chạm từ app
+static int gSbToggleStateToken = 0;     // SpringBoard: set state toggle-active
+static int gAppToggleStateToken = 0;    // App: đọc state toggle-active
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -110,7 +126,41 @@ static void refreshOverlayWindowVisibility(void);
 static void updateScaleLockControlsVisibility(void);
 static void updateOverlayControlValues(void);
 static UIWindowScene *foregroundOverlayScene(void);
-static UIWindow *keyWindowForScene(UIWindowScene *scene);
+
+static NSString * const kOverlayLogPath = @"/var/mobile/Library/OverlayIOSTOOL/tweak.log";
+
+// Ghi log ra file để đọc bằng Filza (chỉ SpringBoard ghi file -> nếu file KHÔNG
+// tồn tại nghĩa là tweak chưa hề chạy trong SpringBoard). Mọi tiến trình vẫn NSLog.
+static void overlayLog(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+
+    NSLog(@"[OverlayIOSTOOL] %@", msg);
+
+    if (!gIsSpringBoardProcess) {
+        return;  // app thứ ba bị sandbox chặn ghi -> chỉ NSLog
+    }
+
+    @try {
+        NSString *line = [NSString stringWithFormat:@"%.3f SB %@\n",
+                          NSDate.date.timeIntervalSince1970, msg];
+        [NSFileManager.defaultManager createDirectoryAtPath:kOverlayDirectory
+                                withIntermediateDirectories:YES
+                                                 attributes:nil
+                                                      error:nil];
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:kOverlayLogPath];
+        if (!handle) {
+            [line writeToFile:kOverlayLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        } else {
+            [handle seekToEndOfFile];
+            [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [handle closeFile];
+        }
+    } @catch (__unused id exception) {
+    }
+}
 
 @implementation OverlayPassthroughView
 
@@ -160,12 +210,74 @@ static UIWindow *keyWindowForScene(UIWindowScene *scene);
 
 @end
 
+// Cửa sổ host (SpringBoard) ở windowLevel rất cao để NỔI trên mọi app + màn hình
+// chính. Vùng trống trả về nil -> touch xuyên xuống app bên dưới (giống AssistiveTouch).
+@interface OverlayHostWindow : UIWindow
+@end
+
+@implementation OverlayHostWindow
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    // Nếu không có view con nào nhận (chạm vào vùng trống) -> super trả về chính
+    // window. Chuyển thành nil để hệ thống chuyển touch xuống app foreground.
+    if (hit == self) {
+        return nil;
+    }
+    return hit;
+}
+
+@end
+
 @interface OverlayGestureHandler : NSObject <UIGestureRecognizerDelegate>
 @end
 
 static OverlayGestureHandler *gGestureHandler = nil;
 
+// Heartbeat: ghi trạng thái app hiện tại vào pasteboard "báo danh" để app tool đọc.
+// status: "loaded" (tweak đã vào app), "img-ok" (đọc được ảnh + đã vẽ), "no-img"
+// (vào được nhưng chưa có ảnh trên pasteboard).
+static void reportAppStatus(NSString *status) {
+    NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
+    if (!bundleIdentifier.length) {
+        return;
+    }
+    @try {
+        UIPasteboard *board = [UIPasteboard pasteboardWithName:kOverlayActiveAppsPasteboard create:YES];
+        if (!board) {
+            return;
+        }
+        NSString *existing = board.string ?: @"";
+        NSMutableArray<NSString *> *kept = [NSMutableArray array];
+        for (NSString *line in [existing componentsSeparatedByString:@"\n"]) {
+            if (!line.length) {
+                continue;
+            }
+            if ([line hasPrefix:[bundleIdentifier stringByAppendingString:@" "]]) {
+                continue;  // bỏ dòng cũ của chính app này
+            }
+            [kept addObject:line];
+        }
+        [kept addObject:[NSString stringWithFormat:@"%@ %@", bundleIdentifier, status]];
+        while (kept.count > 40) {
+            [kept removeObjectAtIndex:0];
+        }
+        board.string = [kept componentsJoinedByString:@"\n"];
+    } @catch (__unused id exception) {
+    }
+}
+
 static BOOL shouldEnableOverlayInCurrentProcess(void) {
+    // KIẾN TRÚC SpringBoard: CHỈ SpringBoard render overlay trên 1 UIWindow level
+    // cực cao -> nổi trên mọi app + màn hình chính (như iPhone 6/7). Cần build arm64e
+    // ĐÚNG CHUẨN (bằng Xcode/macOS qua GitHub Actions) thì mới nạp vào SpringBoard
+    // arm64e mà không PAC-crash.
+    return [NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.apple.springboard"];
+}
+
+// App thứ ba đủ điều kiện chạy "relay chạm" (chỉ phát hiện chạm ngoài ảnh -> báo
+// SpringBoard toggle dim). KHÔNG vẽ gì, KHÔNG đọc file -> không dính sandbox, nhẹ.
+static BOOL shouldRelayAppTouches(void) {
     NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
     NSString *bundlePath = NSBundle.mainBundle.bundlePath;
     NSString *executablePath = NSBundle.mainBundle.executablePath;
@@ -173,80 +285,90 @@ static BOOL shouldEnableOverlayInCurrentProcess(void) {
     if (!bundleIdentifier.length || !bundlePath.length) {
         return NO;
     }
-
     if ([bundleIdentifier isEqualToString:@"com.apple.springboard"]) {
-        return YES;
+        return NO;  // SpringBoard tự xử lý chạm của nó
     }
-
-    // App tool tự vẽ overlay bằng code riêng -> không cần tweak (tránh trùng 2 overlay).
     if ([bundleIdentifier hasPrefix:@"com.vietanh.overlayiostool"]) {
-        return NO;
+        return NO;  // app tool
     }
-
     if ([bundlePath containsString:@".appex"] || [executablePath containsString:@"/PlugIns/"]) {
         return NO;
     }
-
     if (![bundlePath hasSuffix:@".app"]) {
         return NO;
     }
-
-    if ([bundlePath hasPrefix:@"/var/containers/Bundle/Application/"] ||
-        [bundlePath hasPrefix:@"/private/var/containers/Bundle/Application/"] ||
-        [bundlePath hasPrefix:@"/Applications/"] ||
-        [bundlePath hasPrefix:@"/var/jb/Applications/"] ||
-        [bundlePath hasPrefix:@"/private/var/jb/Applications/"]) {
-        return YES;
-    }
-
-    return NO;
+    return [bundlePath hasPrefix:@"/var/containers/Bundle/Application/"] ||
+           [bundlePath hasPrefix:@"/private/var/containers/Bundle/Application/"] ||
+           [bundlePath hasPrefix:@"/Applications/"] ||
+           [bundlePath hasPrefix:@"/var/jb/Applications/"] ||
+           [bundlePath hasPrefix:@"/private/var/jb/Applications/"];
 }
 
+// SpringBoard công bố: "toggle-click đang hiệu lực" (ảnh hiện + bật toggle + không
+// scale-lock) qua notify state. App đọc state này để biết có cần relay chạm hay không.
+static void updateToggleActiveState(void) {
+    if (!gIsSpringBoardProcess) {
+        return;
+    }
+    if (gSbToggleStateToken == 0) {
+        notify_register_check(kOverlayToggleActiveState, &gSbToggleStateToken);
+    }
+    BOOL active = gToggleClickEnabled && gOverlayImageView && gOverlayVisible && !gScaleLockModeEnabled;
+    notify_set_state(gSbToggleStateToken, active ? 1 : 0);
+    notify_post(kOverlayToggleActiveState);
+}
+
+// App: đọc nhanh state toggle-active (không dính sandbox).
+static BOOL overlayToggleActiveForApp(void) {
+    if (gAppToggleStateToken == 0) {
+        return NO;
+    }
+    uint64_t state = 0;
+    notify_get_state(gAppToggleStateToken, &state);
+    return state != 0;
+}
+
+// LƯỚI AN TOÀN CHỐNG TREO TÁO — viết bằng C THUẦN (không phụ thuộc ObjC, vốn là
+// thứ CÓ THỂ lỗi nếu ABI sai). Mỗi lần SpringBoard khởi động: tăng bộ đếm crash.
+// Nếu crash >= 2 lần liên tiếp -> ghi cờ disabled -> tweak TỰ TẮT ngay lần sau ->
+// máy vào được màn hình chính. Nếu SpringBoard sống qua 15s -> coi như khoẻ -> xoá
+// bộ đếm. Tối đa 2 lần respring, KHÔNG bao giờ treo táo vĩnh viễn.
 static BOOL springBoardCrashGuardShouldDisable(void) {
-    NSFileManager *fileManager = NSFileManager.defaultManager;
-    if ([fileManager fileExistsAtPath:kSpringBoardDisabledPath]) {
-        return YES;
+    static const char *kDir = "/var/mobile/Library/OverlayIOSTOOL";
+    static const char *kDisabled = "/var/mobile/Library/OverlayIOSTOOL/disabled-after-crash";
+    static const char *kCount = "/var/mobile/Library/OverlayIOSTOOL/sb-crash-count";
+
+    mkdir(kDir, 0755);  // tạo thư mục nếu chưa có (bỏ qua nếu đã có)
+
+    if (access(kDisabled, F_OK) == 0) {
+        return YES;  // đã bị tắt từ trước -> không nạp
     }
 
-    NSTimeInterval now = NSDate.date.timeIntervalSince1970;
-    NSDictionary *previousState = [NSDictionary dictionaryWithContentsOfFile:kSpringBoardGuardPath];
-    BOOL previousLaunchArmed = [previousState[@"armed"] boolValue];
-    NSTimeInterval previousLaunchTime = [previousState[@"timestamp"] doubleValue];
-    NSInteger failureCount = [previousState[@"failureCount"] integerValue];
+    int count = 0;
+    FILE *rf = fopen(kCount, "r");
+    if (rf) {
+        if (fscanf(rf, "%d", &count) != 1) {
+            count = 0;
+        }
+        fclose(rf);
+    }
+    count += 1;
 
-    if (previousLaunchArmed && previousLaunchTime > 0 && now - previousLaunchTime < 120.0) {
-        failureCount += 1;
-    } else {
-        failureCount = 1;
+    if (count >= 2) {
+        FILE *df = fopen(kDisabled, "w");
+        if (df) { fputs("1", df); fclose(df); }
+        unlink(kCount);
+        NSLog(@"[OverlayIOSTOOL] Disabled after %d SpringBoard launch failures", count);
+        return YES;  // crash 2 lần -> tắt ngay
     }
 
-    [fileManager createDirectoryAtPath:kOverlayDirectory
-           withIntermediateDirectories:YES
-                            attributes:nil
-                                 error:nil];
+    FILE *wf = fopen(kCount, "w");
+    if (wf) { fprintf(wf, "%d", count); fclose(wf); }
 
-    if (failureCount >= 3) {
-        [@"disabled" writeToFile:kSpringBoardDisabledPath
-                      atomically:YES
-                        encoding:NSUTF8StringEncoding
-                           error:nil];
-        NSLog(@"[OverlayIOSTOOL] Disabled after repeated SpringBoard launch failures");
-        return YES;
-    }
-
-    [@{
-        @"armed": @YES,
-        @"timestamp": @(now),
-        @"failureCount": @(failureCount)
-    } writeToFile:kSpringBoardGuardPath atomically:YES];
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)),
+    // SpringBoard sống qua 15s -> khoẻ -> xoá bộ đếm (lần boot kế tính lại từ đầu).
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        [@{
-            @"armed": @NO,
-            @"timestamp": @(NSDate.date.timeIntervalSince1970),
-            @"failureCount": @0
-        } writeToFile:kSpringBoardGuardPath atomically:YES];
+        unlink(kCount);
     });
     return NO;
 }
@@ -508,41 +630,39 @@ static void animateOverlayAlphaForCurrentDimState(void) {
 }
 
 static BOOL rendersOverlayImage(void) {
-    // iOS 15: cửa sổ SpringBoard không nổi trên app foreground được, nên CHO MỖI
-    // app foreground tự vẽ overlay trong scene active của nó -> nổi trên app đó.
+    // Per-app: mỗi app bật overlay đều render trong cửa sổ của chính nó.
     return gOverlayProcessEnabled;
 }
 
 static void ensureOverlayRoot(void);
 
+static const CGFloat kOverlayWindowLevel = 100000.0;  // cao hơn status bar/alert -> nổi trên mọi app
+
 static void refreshOverlayWindowVisibility(void) {
-    if (!gOverlayRoot) {
+    updateToggleActiveState();
+
+    if (!gOverlayRoot || !gOverlayWindow) {
         return;
     }
 
-    // Nếu host window không còn (hoặc không còn là key window của scene foreground)
-    // -> tái-gắn gOverlayRoot vào key window hiện tại để bám theo app đang foreground.
-    UIWindowScene *scene = foregroundOverlayScene();
-    UIWindow *currentKey = keyWindowForScene(scene);
-    if (currentKey && currentKey != gOverlayHostWindow) {
-        gOverlayHostWindow = currentKey;
-        gOverlayRoot.frame = currentKey.bounds;
-        [currentKey addSubview:gOverlayRoot];
-    }
-
-    // Khi khoá/tắt màn hình: chỉ ẩn container, KHÔNG xoá ảnh/state.
+    // Khi khoá/tắt màn hình: chỉ ẩn cửa sổ, KHÔNG xoá ảnh/state.
     BOOL lockHidden = gScreenBlanked || gScreenLocked || gDataUnavailable;
     BOOL baseHidden = !gOverlayVisible && !gScaleLockModeEnabled;
-    gOverlayRoot.hidden = lockHidden || baseHidden;
+    BOOL hidden = lockHidden || baseHidden;
 
-    if (rendersOverlayImage()) {
-        gOverlayRoot.userInteractionEnabled = YES;
-    } else {
-        gOverlayRoot.userInteractionEnabled = gOverlayVisible || gScaleLockModeEnabled;
-    }
+    gOverlayWindow.hidden = hidden;
+    gOverlayRoot.hidden = hidden;
+    gOverlayRoot.userInteractionEnabled = YES;
 
-    if (!gOverlayRoot.hidden && gOverlayHostWindow) {
-        [gOverlayHostWindow bringSubviewToFront:gOverlayRoot];
+    if (!hidden) {
+        // Giữ luôn ở trên cùng (một số chuyển cảnh của SpringBoard hạ level).
+        gOverlayWindow.windowLevel = kOverlayWindowLevel;
+        if (gOverlayImageView) {
+            [gOverlayRoot bringSubviewToFront:gOverlayImageView];
+        }
+        if (gScaleLockControlsPanel && !gScaleLockControlsPanel.hidden) {
+            [gOverlayRoot bringSubviewToFront:gScaleLockControlsPanel];
+        }
     }
 }
 
@@ -591,7 +711,7 @@ static UIButton *quickActionsButton(NSString *title, SEL action) {
     [button setTitle:title forState:UIControlStateNormal];
     [button setTitleColor:[UIColor colorWithRed:0.10 green:0.52 blue:1.0 alpha:1.0]
                  forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:22.0 weight:UIFontWeightRegular];
+    button.titleLabel.font = [UIFont systemFontOfSize:22.0 weight:kOverlayFontWeightRegular];
     button.backgroundColor = [UIColor colorWithWhite:0.11 alpha:0.98];
     [button addTarget:gGestureHandler action:action forControlEvents:UIControlEventTouchUpInside];
     return button;
@@ -638,13 +758,13 @@ static void showOverlayQuickActions(void) {
     gQuickActionsPanel.layer.masksToBounds = YES;
     [rootView addSubview:gQuickActionsPanel];
 
-    UILabel *titleLabel = quickActionsLabel(@"Số dư", 18.0, UIFontWeightSemibold);
+    UILabel *titleLabel = quickActionsLabel(@"Số dư", 18.0, kOverlayFontWeightSemibold);
     titleLabel.frame = CGRectMake(16.0, 17.0, panelWidth - 32.0, 26.0);
     [gQuickActionsPanel addSubview:titleLabel];
 
     UILabel *messageLabel = quickActionsLabel(@"Nhanh chóng di chuyển đến trang nạp/rút tiền trên trang web của broker",
                                                15.0,
-                                               UIFontWeightRegular);
+                                               kOverlayFontWeightRegular);
     messageLabel.textColor = [UIColor colorWithWhite:0.76 alpha:1.0];
     messageLabel.frame = CGRectMake(22.0, 47.0, panelWidth - 44.0, 52.0);
     [gQuickActionsPanel addSubview:messageLabel];
@@ -708,10 +828,12 @@ static void attachGestures(UIImageView *imageView) {
 static UIWindowScene *foregroundOverlayScene(void) {
     UIWindowScene *active = nil;
     UIWindowScene *fallback = nil;
+    NSUInteger windowSceneCount = 0;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) {
             continue;
         }
+        windowSceneCount++;
         if (scene.activationState == UISceneActivationStateForegroundActive) {
             active = (UIWindowScene *)scene;
             break;
@@ -720,48 +842,84 @@ static UIWindowScene *foregroundOverlayScene(void) {
             fallback = (UIWindowScene *)scene;
         }
     }
-    return active ?: fallback;
-}
 
-// iOS 14-compatible: UIWindowScene.keyWindow chỉ có từ iOS 15, nên tự tìm
-// trong scene.windows cửa sổ key, fallback về cửa sổ đầu tiên.
-static UIWindow *keyWindowForScene(UIWindowScene *scene) {
-    if (!scene) {
-        return nil;
+    UIWindowScene *chosen = active ?: fallback;
+    if (chosen) {
+        return chosen;
     }
-    for (UIWindow *window in scene.windows) {
-        if (window.isKeyWindow) {
-            return window;
+
+    // Fallback: SpringBoard có thể không liệt kê UIWindowScene trong connectedScenes
+    // ở mọi thời điểm -> lấy scene từ cửa sổ đang tồn tại.
+    for (UIWindow *window in UIApplication.sharedApplication.windows) {
+        if (window.windowScene) {
+            return window.windowScene;
         }
     }
-    return scene.windows.firstObject;
+
+    overlayLog(@"foregroundOverlayScene: KHONG co UIWindowScene (connected windowScenes=%lu, windows=%lu)",
+               (unsigned long)windowSceneCount,
+               (unsigned long)UIApplication.sharedApplication.windows.count);
+    return nil;
 }
 
 static void ensureOverlayRoot(void) {
-    if (gOverlayRoot || !gOverlayHostReady) {
+    if (gOverlayRoot || !gOverlayHostReady || !gOverlayProcessEnabled) {
         return;
     }
 
-    // iOS 15: KHÔNG tạo UIWindow riêng (không render trên app foreground). Thay vào đó
-    // gắn 1 container UIView full-screen passthrough vào key window đang có của tiến trình.
-    UIWindowScene *scene = foregroundOverlayScene();
-    if (!scene) {
-        return;  // chưa có scene active -> đợi tiến trình thành foreground rồi tạo
+    // iOS 15 (kiến trúc B): SpringBoard tạo 1 UIWindow riêng đặt windowLevel cực cao
+    // -> cửa sổ NỔI trên mọi app foreground và màn hình chính. KHÔNG makeKeyAndVisible
+    // (chỉ hidden=NO) để không cướp first responder / bàn phím của app bên dưới.
+    // Bọc @try/@catch: nếu bước nào ném exception thì KHÔNG để crash SpringBoard,
+    // chỉ ghi log và bỏ qua (log cuối cùng cho biết kẹt ở đâu).
+    @try {
+        UIWindowScene *scene = foregroundOverlayScene();
+        CGRect bounds = UIScreen.mainScreen.bounds;
+
+        OverlayHostWindow *window = nil;
+        if (scene) {
+            CGRect sceneBounds = scene.coordinateSpace.bounds;
+            if (!CGRectIsEmpty(sceneBounds)) {
+                bounds = sceneBounds;
+            }
+            overlayLog(@"ensureOverlayRoot: B1 initWithWindowScene bounds=%@", NSStringFromCGRect(bounds));
+            window = [[OverlayHostWindow alloc] initWithWindowScene:scene];
+        } else {
+            overlayLog(@"ensureOverlayRoot: B1 KHONG co scene -> initWithFrame bounds=%@", NSStringFromCGRect(bounds));
+            window = [[OverlayHostWindow alloc] initWithFrame:bounds];
+        }
+
+        overlayLog(@"ensureOverlayRoot: B2 cau hinh window");
+        window.frame = bounds;
+        window.windowLevel = kOverlayWindowLevel;
+        window.backgroundColor = UIColor.clearColor;
+        window.opaque = NO;
+        window.userInteractionEnabled = YES;
+
+        overlayLog(@"ensureOverlayRoot: B3 tao root view");
+        OverlayPassthroughView *root = [[OverlayPassthroughView alloc] initWithFrame:bounds];
+        root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        root.backgroundColor = UIColor.clearColor;
+        root.userInteractionEnabled = YES;
+
+        overlayLog(@"ensureOverlayRoot: B4 gan rootViewController");
+        UIViewController *hostController = [UIViewController new];
+        hostController.view = root;
+        window.rootViewController = hostController;
+
+        overlayLog(@"ensureOverlayRoot: B5 hien window (hidden=NO)");
+        window.hidden = NO;   // hiển thị mà KHÔNG làm key window
+
+        gOverlayWindow = window;
+        gOverlayHostWindow = window;
+        gOverlayRoot = root;
+        overlayLog(@"ensureOverlayRoot: WINDOW SAN SANG level=%.0f hidden=%d", (double)window.windowLevel, window.hidden);
+    } @catch (NSException *exception) {
+        overlayLog(@"ensureOverlayRoot: EXCEPTION %@ - %@", exception.name, exception.reason);
+        gOverlayWindow = nil;
+        gOverlayHostWindow = nil;
+        gOverlayRoot = nil;
     }
-
-    UIWindow *hostWindow = keyWindowForScene(scene);
-    if (!hostWindow) {
-        return;  // chưa có key window -> đợi foreground
-    }
-
-    gOverlayHostWindow = hostWindow;
-
-    gOverlayRoot = [[OverlayPassthroughView alloc] initWithFrame:hostWindow.bounds];
-    gOverlayRoot.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    gOverlayRoot.backgroundColor = UIColor.clearColor;
-    gOverlayRoot.userInteractionEnabled = YES;
-    [hostWindow addSubview:gOverlayRoot];
-    [hostWindow bringSubviewToFront:gOverlayRoot];
 }
 
 static void applyScaleLockMode(BOOL enabled);
@@ -957,6 +1115,7 @@ static void toggleClickTapped(__unused UIButton *button) {
     updateOverlayControlValues();
     writeOverlaySettings();
     persistOverlayState(YES);
+    updateToggleActiveState();
 }
 
 static void hideImageFromPanelTapped(__unused UIButton *button) {
@@ -1031,12 +1190,12 @@ static void ensureScaleLockControls(void) {
 
     for (NSUInteger index = 0; index < titles.count; index++) {
         CGFloat y = 14.0 + index * 55.0;
-        UILabel *title = overlayControlLabel(titles[index], 13.0, UIFontWeightSemibold);
+        UILabel *title = overlayControlLabel(titles[index], 13.0, kOverlayFontWeightSemibold);
         title.frame = CGRectMake(14.0, y, 130.0, 20.0);
         [gScaleLockControlsPanel addSubview:title];
         [titleLabels addObject:title];
 
-        UILabel *value = overlayControlLabel(@"", 13.0, UIFontWeightRegular);
+        UILabel *value = overlayControlLabel(@"", 13.0, kOverlayFontWeightRegular);
         value.textAlignment = NSTextAlignmentRight;
         value.frame = CGRectMake(gScaleLockControlsPanel.bounds.size.width - 104.0, y, 90.0, 20.0);
         value.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
@@ -1078,7 +1237,7 @@ static void ensureScaleLockControls(void) {
     gToggleClickButton.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
     gToggleClickButton.backgroundColor = [UIColor colorWithRed:0.12 green:0.47 blue:1.0 alpha:0.95];
     gToggleClickButton.layer.cornerRadius = 8.0;
-    gToggleClickButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    gToggleClickButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:kOverlayFontWeightSemibold];
     [gToggleClickButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     [gToggleClickButton addTarget:gOverlayControlTarget action:@selector(toggleClickTapped:) forControlEvents:UIControlEventTouchUpInside];
     [gScaleLockControlsPanel addSubview:gToggleClickButton];
@@ -1088,7 +1247,7 @@ static void ensureScaleLockControls(void) {
     gHideImageButton.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
     gHideImageButton.backgroundColor = [UIColor colorWithRed:0.95 green:0.22 blue:0.18 alpha:0.95];
     gHideImageButton.layer.cornerRadius = 8.0;
-    gHideImageButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    gHideImageButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:kOverlayFontWeightSemibold];
     [gHideImageButton setTitle:@"An anh" forState:UIControlStateNormal];
     [gHideImageButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
     [gHideImageButton addTarget:gOverlayControlTarget action:@selector(hideImageTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -1135,12 +1294,15 @@ static void showOverlayImage(UIImage *image) {
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
+      @try {
         ensureOverlayRoot();
         if (!gOverlayRoot) {
+            overlayLog(@"showOverlayImage: gOverlayRoot=nil (chua tao duoc window) -> KHONG hien");
             return;
         }
 
         if (!gOverlayImageView) {
+            overlayLog(@"showOverlayImage: tao image view + gesture");
             gOverlayImageView = [[UIImageView alloc] initWithFrame:centeredFrameForImage(image)];
             configureRawImageView(gOverlayImageView);
             attachGestures(gOverlayImageView);
@@ -1160,7 +1322,12 @@ static void showOverlayImage(UIImage *image) {
         applyOverlayStateFromDisk();
         refreshOverlayWindowVisibility();
         persistOverlayState(NO);
-        NSLog(@"[OverlayIOSTOOL] Overlay shown %.0fx%.0f", image.size.width, image.size.height);
+        overlayLog(@"Overlay HIEN %.0fx%.0f windowHidden=%d rootHidden=%d",
+                   image.size.width, image.size.height,
+                   gOverlayWindow.hidden, gOverlayRoot.hidden);
+      } @catch (NSException *exception) {
+        overlayLog(@"showOverlayImage: EXCEPTION %@ - %@", exception.name, exception.reason);
+      }
     });
 }
 
@@ -1171,10 +1338,11 @@ static void loadAndShowPublishedOverlay(void) {
     }
 
     if (!image) {
-        NSLog(@"[OverlayIOSTOOL] No published image");
+        overlayLog(@"loadAndShowPublishedOverlay: KHONG doc duoc anh (pasteboard+file %@ deu rong)", kOverlayImagePath);
         return;
     }
 
+    overlayLog(@"loadAndShowPublishedOverlay: doc duoc anh %.0fx%.0f", image.size.width, image.size.height);
     showOverlayImage(image);
 }
 
@@ -1201,9 +1369,16 @@ static void removeOverlay(void) {
             [gOverlayRoot removeFromSuperview];
             gOverlayRoot = nil;
         }
+
+        if (gOverlayWindow) {
+            gOverlayWindow.hidden = YES;
+            gOverlayWindow.rootViewController = nil;
+            gOverlayWindow = nil;
+        }
         gOverlayHostWindow = nil;
 
         gOverlayVisible = NO;
+        updateToggleActiveState();
         NSLog(@"[OverlayIOSTOOL] Overlay removed");
     });
 }
@@ -1235,6 +1410,7 @@ static void loadOverlaySettings(void) {
     }
     applyOverlayAlpha();
     updateOverlayControlValues();
+    updateToggleActiveState();
     NSLog(@"[OverlayIOSTOOL] Settings toggle=%@ hide=%ld show=%ld dim=%.2f anim=%ld", @(gToggleClickEnabled), (long)gHideDelayMs, (long)gShowDelayMs, gDimOpacity, (long)gDimAnimationMs);
 }
 
@@ -1376,7 +1552,7 @@ static void registerOverlayNotification(void) {
     }
 
     notify_register_dispatch(kOverlayUpdatedNotification, &gNotifyToken, dispatch_get_main_queue(), ^(__unused int token) {
-        NSLog(@"[OverlayIOSTOOL] Update notification received");
+        overlayLog(@"Nhan notification 'image-updated' -> tai & hien anh");
         loadAndShowPublishedOverlay();
     });
 
@@ -1404,6 +1580,14 @@ static void registerOverlayNotification(void) {
             gScreenLocked = (state != 0);    // 1 = đã khoá
             refreshOverlayWindowVisibility();
         });
+
+        // App thứ ba báo "có chạm ngoài ảnh" -> toggle dim ảnh (toggle-click xuyên app).
+        notify_register_dispatch(kOverlayAppTouchNotification, &gAppTouchToken, dispatch_get_main_queue(), ^(__unused int token) {
+            scheduleToggleOverlayVisibility();
+        });
+
+        // Công bố state ban đầu cho các app đọc.
+        updateToggleActiveState();
     }
 
     notify_register_dispatch(kOverlayStateNotification, &gStateToken, dispatch_get_main_queue(), ^(__unused int token) {
@@ -1424,20 +1608,46 @@ static void activateOverlayHost(void) {
         gOverlayHostReady = YES;
         loadOverlaySettings();
         registerOverlayNotification();
-        startRealtimeServerIfNeeded();
-        NSLog(@"[OverlayIOSTOOL] Overlay host ready in %@", NSBundle.mainBundle.bundleIdentifier ?: NSProcessInfo.processInfo.processName);
     }
 
-    // MỌI tiến trình (kể cả SpringBoard ở màn hình chính) khi trở thành active
-    // sẽ tải + hiện lại overlay -> overlay nổi MỌI LÚC, kể cả khi không mở app nào.
-    BOOL hasPublishedImage = [NSFileManager.defaultManager fileExistsAtPath:kOverlayImagePath]
-                             || overlayPasteboard(NO).image != nil;
-    if (hasPublishedImage) {
-        loadAndShowPublishedOverlay();
-    } else if (gOverlayImageView) {
-        // overlay đã tạo từ trước -> tái-gắn container vào key window foreground hiện tại.
+    // Báo danh: app này đã có tweak chạy.
+    reportAppStatus(@"loaded");
+
+    // PER-APP: khi app foreground, tự đọc ảnh từ pasteboard và hiện trong app này.
+    if (gOverlayImageView) {
         refreshOverlayWindowVisibility();
+        reportAppStatus(@"img-ok");
+        return;
     }
+
+    UIImage *image = overlayImageFromPasteboard();
+    if (!image) {
+        image = overlayImageFromSharedFile();  // fallback (chỉ chạy được nơi đọc được file)
+    }
+    if (image) {
+        showOverlayImage(image);
+        reportAppStatus(@"img-ok");
+    } else {
+        reportAppStatus(@"no-img");
+    }
+}
+
+// Thử hiện lại liên tục tới ~24s sau khi tweak nạp: app có thể vừa mở (scene chưa
+// sẵn sàng), hoặc bạn bấm "Hiển thị" muộn -> cứ thử lại cho tới khi ảnh hiện.
+// LƯU Ý: chỉ chạy được nếu dylib ĐÃ được ElleKit nạp vào app lúc app khởi động;
+// không thể "tự nạp" nếu chưa được inject.
+static void scheduleActivationRetry(int attempt) {
+    if (attempt >= 12 || gOverlayImageView) {
+        return;
+    }
+    double delaySeconds = (attempt == 0) ? 1.0 : 2.0;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delaySeconds * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        activateOverlayHost();
+        if (!gOverlayImageView) {
+            scheduleActivationRetry(attempt + 1);
+        }
+    });
 }
 
 @implementation OverlayGestureHandler
@@ -1620,6 +1830,18 @@ static void activateOverlayHost(void) {
 - (void)sendEvent:(UIEvent *)event {
     if (!gOverlayProcessEnabled) {
         %orig(event);
+        // App relay: cú chạm lọt tới app = chạm NGOÀI ảnh (vùng ảnh bị cửa sổ
+        // SpringBoard nuốt). Nếu toggle-click đang hiệu lực -> báo SpringBoard dim.
+        if (gAppTouchRelayEnabled && event.type == UIEventTypeTouches) {
+            for (UITouch *touch in event.allTouches) {
+                if (touch.phase == UITouchPhaseBegan) {
+                    if (overlayToggleActiveForApp()) {
+                        notify_post(kOverlayAppTouchNotification);
+                    }
+                    break;
+                }
+            }
+        }
         return;
     }
 
@@ -1680,38 +1902,59 @@ static void activateOverlayHost(void) {
     @autoreleasepool {
         NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
         gIsSpringBoardProcess = [bundleIdentifier isEqualToString:@"com.apple.springboard"];
+        if (gIsSpringBoardProcess) {
+            overlayLog(@"[ctor] dylib DA NAP vao SpringBoard (bat dau)");
+        }
         if (gIsSpringBoardProcess && springBoardCrashGuardShouldDisable()) {
+            overlayLog(@"[ctor] CRASH-GUARD chan! (co file disabled-after-crash hoac SpringBoard vua crash lien tuc) -> tweak TU TAT trong SpringBoard");
             return;
         }
         gOverlayProcessEnabled = shouldEnableOverlayInCurrentProcess();
-        if (!gOverlayProcessEnabled) {
+        gAppTouchRelayEnabled = !gOverlayProcessEnabled && shouldRelayAppTouches();
+        if (!gOverlayProcessEnabled && !gAppTouchRelayEnabled) {
             return;
         }
 
         %init(OverlayUIApplicationHooks);
 
-        NSLog(@"[OverlayIOSTOOL] Loaded in %@", NSBundle.mainBundle.bundleIdentifier ?: NSProcessInfo.processInfo.processName);
+        // App relay: chỉ cần hook sendEvent + token đọc state. KHÔNG vẽ, KHÔNG đọc file.
+        if (gAppTouchRelayEnabled) {
+            notify_register_check(kOverlayToggleActiveState, &gAppToggleStateToken);
+            NSLog(@"[OverlayIOSTOOL] App touch relay in %@", bundleIdentifier ?: NSProcessInfo.processInfo.processName);
+            return;
+        }
+
+        overlayLog(@"[ctor] host khoi tao xong, cho DidBecomeActive + retry");
         dispatch_async(dispatch_get_main_queue(), ^{
             if (gObserversInstalled) {
                 return;
             }
             gObserversInstalled = YES;
 
-            [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+            // BÁO DANH NGAY khi dylib nạp (không chờ app active) -> app tool thấy
+            // ngay "loaded" để biết tweak ĐÃ vào app này.
+            reportAppStatus(@"loaded");
+
+            // DÙNG CHUỖI LITERAL thay cho hằng số import của UIKit. Crash log cho thấy
+            // PAC-crash xảy ra đúng tại `[name copy]` trên hằng số NSString import
+            // (UIApplicationDidBecomeActiveNotification...). Giá trị của các hằng này
+            // BẰNG đúng tên symbol -> dùng @"..." là chuỗi của TA, không import -> né
+            // hẳn điểm crash (lớp phòng thủ kèm với clang 13).
+            [[NSNotificationCenter defaultCenter] addObserverForName:@"UIApplicationDidBecomeActiveNotification"
                                                               object:nil
                                                                queue:NSOperationQueue.mainQueue
                                                           usingBlock:^(__unused NSNotification *notification) {
                 activateOverlayHost();
             }];
             if (gIsSpringBoardProcess) {
-                [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationProtectedDataWillBecomeUnavailable
+                [[NSNotificationCenter defaultCenter] addObserverForName:@"UIApplicationProtectedDataWillBecomeUnavailable"
                                                                   object:nil
                                                                    queue:NSOperationQueue.mainQueue
                                                               usingBlock:^(__unused NSNotification *notification) {
                     gDataUnavailable = YES;          // khoá máy -> chỉ ẩn, giữ ảnh
                     refreshOverlayWindowVisibility();
                 }];
-                [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationProtectedDataDidBecomeAvailable
+                [[NSNotificationCenter defaultCenter] addObserverForName:@"UIApplicationProtectedDataDidBecomeAvailable"
                                                                   object:nil
                                                                    queue:NSOperationQueue.mainQueue
                                                               usingBlock:^(__unused NSNotification *notification) {
@@ -1720,10 +1963,9 @@ static void activateOverlayHost(void) {
                 }];
             }
         });
-        if (gIsSpringBoardProcess) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                activateOverlayHost();
-            });
-        }
+
+        // KÍCH HOẠT DỰ PHÒNG + thử lại tới ~24s: app có thể đã ACTIVE trước khi
+        // observer kịp thêm, hoặc ảnh được đăng muộn -> thử lại liên tục cho chắc.
+        scheduleActivationRetry(0);
     }
 }

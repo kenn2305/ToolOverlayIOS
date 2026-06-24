@@ -6,9 +6,108 @@ static NSString * const kOverlayImagePath = @"/var/mobile/Library/OverlayIOSTOOL
 static NSString * const kOverlaySettingsPath = @"/var/mobile/Library/OverlayIOSTOOL/settings.plist";
 static NSString * const kOverlayStatePath = @"/var/mobile/Library/OverlayIOSTOOL/state.plist";
 static NSString * const kOverlayPasteboardName = @"com.vietanh.overlayiostool.image";
+static NSString * const kOverlayLogPath = @"/var/mobile/Library/OverlayIOSTOOL/tweak.log";
 static const char *kOverlayUpdatedNotification = "com.vietanh.overlayiostool.image-updated";
 static const char *kOverlayRemoveNotification = "com.vietanh.overlayiostool.image-remove";
 static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.settings-updated";
+
+// App ghi log vào CÙNG file với tweak (app có entitlements đọc/ghi /var/mobile/Library)
+// -> 1 file thấy được cả phía app (APP) lẫn phía SpringBoard (SB).
+static void appLog(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+
+    NSString *line = [NSString stringWithFormat:@"%.3f APP %@\n", NSDate.date.timeIntervalSince1970, msg];
+    [NSFileManager.defaultManager createDirectoryAtPath:kOverlayDirectory withIntermediateDirectories:YES attributes:nil error:nil];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:kOverlayLogPath];
+    if (!handle) {
+        [line writeToFile:kOverlayLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        @try {
+            [handle seekToEndOfFile];
+            [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        } @catch (__unused id exception) {
+        }
+        [handle closeFile];
+    }
+}
+
+#pragma mark - Log viewer
+
+@interface LogViewerController : UIViewController
+@property (nonatomic, strong) UITextView *textView;
+@end
+
+@implementation LogViewerController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Log tweak";
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
+
+    self.textView = [UITextView new];
+    self.textView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.textView.editable = NO;
+    self.textView.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+    [self.view addSubview:self.textView];
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [self.textView.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        [self.textView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:8],
+        [self.textView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-8],
+        [self.textView.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
+    ]];
+
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(closeTapped)];
+    self.navigationItem.rightBarButtonItems = @[
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemTrash target:self action:@selector(clearTapped)],
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(reload)],
+    ];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self reload];
+}
+
+- (void)reload {
+    NSMutableString *out = [NSMutableString string];
+
+    // Bảng "tweak đang chạy trong app nào" (đọc từ pasteboard báo danh).
+    [out appendString:@"=== TWEAK ĐANG CHẠY TRONG APP NÀO ===\n"];
+    UIPasteboard *board = [UIPasteboard pasteboardWithName:@"com.vietanh.overlayiostool.active-apps" create:NO];
+    NSString *active = board.string;
+    if (active.length) {
+        for (NSString *line in [active componentsSeparatedByString:@"\n"]) {
+            if (line.length) {
+                [out appendFormat:@"  • %@\n", line];
+            }
+        }
+        [out appendString:@"\n(img-ok = đã hiện ảnh | no-img = vào được nhưng chưa có ảnh | loaded = tweak đã vào)\n"];
+    } else {
+        [out appendString:@"  (chưa app nào báo danh)\n  -> Mở app đích (vd Facebook) 1 lần rồi quay lại bấm Làm mới.\n"];
+    }
+
+    [out appendString:@"\n=== LOG (tweak.log) ===\n"];
+    NSString *content = [NSString stringWithContentsOfFile:kOverlayLogPath encoding:NSUTF8StringEncoding error:nil];
+    [out appendString:content.length ? content : @"(trống)"];
+
+    self.textView.text = out;
+}
+
+- (void)clearTapped {
+    [@"" writeToFile:kOverlayLogPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [self reload];
+}
+
+- (void)closeTapped {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+@end
 
 @interface ViewController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @property (nonatomic, strong) UIImage *selectedImage;
@@ -37,6 +136,10 @@ static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.se
 
     self.title = @"OverlayIOSTOOL";
     self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Log"
+                                                                              style:UIBarButtonItemStylePlain
+                                                                             target:self
+                                                                             action:@selector(openLogViewer)];
     [self buildUI];
     [self loadSettings];
     [self registerSettingsNotification];
@@ -420,14 +523,19 @@ static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.se
 
     BOOL wroteFile = [self writeFallbackFileForImage:self.selectedImage];
     BOOL wrotePasteboard = [self publishImageToPasteboard:self.selectedImage];
+    appLog(@"showImageTapped: wroteFile=%d wrotePasteboard=%d fileExists=%d",
+           wroteFile, wrotePasteboard,
+           [NSFileManager.defaultManager fileExistsAtPath:kOverlayImagePath]);
 
     if (!wroteFile && !wrotePasteboard) {
         self.statusLabel.text = @"Khong gui duoc anh";
+        appLog(@"showImageTapped: KHONG ghi duoc anh (ca file lan pasteboard that bai)");
         notify_post(kOverlayRemoveNotification);
         return;
     }
 
     notify_post(kOverlayUpdatedNotification);
+    appLog(@"showImageTapped: da post notify 'image-updated' -> cho SpringBoard hien");
     [self showAppOverlay];
     self.statusLabel.text = @"Da gui anh den overlay";
 }
@@ -525,6 +633,13 @@ static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.se
 
 - (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker {
     [picker dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)openLogViewer {
+    LogViewerController *logViewer = [LogViewerController new];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:logViewer];
+    nav.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 @end
