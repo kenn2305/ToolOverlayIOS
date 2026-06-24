@@ -186,7 +186,10 @@ static BOOL shouldEnableOverlayInCurrentProcess(void) {
         return YES;
     }
 
-    // Cho phép overlay hiện NGAY trong chính app tool (foreground + đã có ảnh) -> thấy liền.
+    // App tool tự vẽ overlay bằng code riêng -> không cần tweak (tránh trùng 2 overlay).
+    if ([bundleIdentifier hasPrefix:@"com.vietanh.overlayiostool"]) {
+        return NO;
+    }
 
     if ([bundlePath containsString:@".appex"] || [executablePath containsString:@"/PlugIns/"]) {
         return NO;
@@ -701,13 +704,7 @@ static void attachGestures(UIImageView *imageView) {
     [imageView addGestureRecognizer:gQuickActionsTapGesture];
 }
 
-static void attachOverlayWindowScene(void) {
-    // iOS 13+ BẮT BUỘC cửa sổ phải thuộc 1 UIWindowScene mới render. Gắn vào scene
-    // đang foreground-active của CHÍNH tiến trình này (app foreground hoặc
-    // SpringBoard khi ở màn hình chính) -> overlay hiện trên tiến trình đó.
-    if (!gOverlayWindow) {
-        return;
-    }
+static UIWindowScene *foregroundOverlayScene(void) {
     UIWindowScene *active = nil;
     UIWindowScene *fallback = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
@@ -722,7 +719,14 @@ static void attachOverlayWindowScene(void) {
             fallback = (UIWindowScene *)scene;
         }
     }
-    UIWindowScene *target = active ?: fallback;
+    return active ?: fallback;
+}
+
+static void attachOverlayWindowScene(void) {
+    if (!gOverlayWindow) {
+        return;
+    }
+    UIWindowScene *target = foregroundOverlayScene();
     if (target && gOverlayWindow.windowScene != target) {
         gOverlayWindow.windowScene = target;
     }
@@ -733,8 +737,15 @@ static void ensureOverlayWindow(void) {
         return;
     }
 
-    CGRect bounds = UIScreen.mainScreen.bounds;
-    gOverlayWindow = [[OverlayPassthroughWindow alloc] initWithFrame:bounds];
+    // QUAN TRỌNG (iOS 15): tạo cửa sổ GẮN THẲNG vào scene bằng initWithWindowScene.
+    // Cách cũ initWithFrame rồi set .windowScene KHÔNG render trên iOS 15.
+    UIWindowScene *scene = foregroundOverlayScene();
+    if (!scene) {
+        return;  // chưa có scene active -> đợi tiến trình thành foreground rồi tạo
+    }
+
+    gOverlayWindow = [[OverlayPassthroughWindow alloc] initWithWindowScene:scene];
+    gOverlayWindow.frame = scene.coordinateSpace.bounds;
     gOverlayWindow.windowLevel = overlayWindowLevel();
     gOverlayWindow.backgroundColor = UIColor.clearColor;
     gOverlayWindow.opaque = NO;
@@ -744,7 +755,6 @@ static void ensureOverlayWindow(void) {
     rootViewController.view.backgroundColor = UIColor.clearColor;
     rootViewController.view.userInteractionEnabled = YES;
     gOverlayWindow.rootViewController = rootViewController;
-    attachOverlayWindowScene();
     gOverlayWindow.hidden = NO;
 }
 
