@@ -594,6 +594,7 @@ static void configureRawImageView(UIImageView *imageView) {
     imageView.backgroundColor = UIColor.clearColor;
     imageView.contentMode = UIViewContentModeScaleAspectFit;
     imageView.userInteractionEnabled = YES;
+    imageView.multipleTouchEnabled = YES;   // BẮT BUỘC để pinch 2 ngón nhận đủ touch
     imageView.clipsToBounds = YES;
     imageView.layer.borderWidth = 0;
     imageView.layer.shadowOpacity = 0;
@@ -808,9 +809,9 @@ static void attachGestures(UIImageView *imageView) {
     gImagePanGesture.delegate = gGestureHandler;
     [imageView addGestureRecognizer:gImagePanGesture];
 
-    gImagePinchGesture = [[UIPinchGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handlePinch:)];
-    gImagePinchGesture.delegate = gGestureHandler;
-    [imageView addGestureRecognizer:gImagePinchGesture];
+    // KHÔNG gắn pinch lên imageView nữa: zoom 2 ngón do MỘT pinch trên root
+    // (gExpandedPinchGesture) đảm nhiệm cho CẢ 2 chế độ. Nếu gắn cả hai, mỗi ngón
+    // có thể rơi vào view khác nhau -> mỗi pinch chỉ nhận 1 ngón -> không zoom được.
 
     gImageLongPressGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handleLongPress:)];
     gImageLongPressGesture.minimumPressDuration = 0.6;   // nhạy hơn (trước 1.0s khó kích hoạt)
@@ -895,12 +896,14 @@ static void ensureOverlayRoot(void) {
         window.backgroundColor = UIColor.clearColor;
         window.opaque = NO;
         window.userInteractionEnabled = YES;
+        window.multipleTouchEnabled = YES;
 
         overlayLog(@"ensureOverlayRoot: B3 tao root view");
         OverlayPassthroughView *root = [[OverlayPassthroughView alloc] initWithFrame:bounds];
         root.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         root.backgroundColor = UIColor.clearColor;
         root.userInteractionEnabled = YES;
+        root.multipleTouchEnabled = YES;
 
         overlayLog(@"ensureOverlayRoot: B4 gan rootViewController");
         UIViewController *hostController = [UIViewController new];
@@ -1829,10 +1832,9 @@ static void scheduleActivationRetry(int attempt) {
         return !gScaleLockModeEnabled;
     }
     if (gestureRecognizer == gExpandedPinchGesture) {
-        if (gScaleLockModeEnabled) {
-            return YES;
-        }
-        return !gOverlayImageView || ![touch.view isDescendantOfView:gOverlayImageView];
+        // Nhận touch ở CẢ 2 chế độ (kể cả khi ngón đặt trên ảnh) để pinch luôn gom
+        // đủ 2 ngón. Pinch chỉ thực sự zoom khi có >=2 touch (xem handleExpandedPinch).
+        return YES;
     }
     if (gestureRecognizer == gInputBlockTapGesture) {
         return gScaleLockModeEnabled;
