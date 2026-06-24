@@ -24,6 +24,14 @@ jobs:
           git clone --quiet --recursive https://github.com/theos/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
 
+      - name: Fix maintainer script permissions
+        run: |
+          for s in preinst postinst prerm postrm; do
+            [ -f "$s" ] && chmod 0755 "$s" || true
+            [ -f "layout/DEBIAN/$s" ] && chmod 0755 "layout/DEBIAN/$s" || true
+          done
+          ls -la postinst || true
+
       - name: Build Package (real Xcode toolchain -> correct arm64e)
         run: |
           export THEOS="$HOME/theos"
