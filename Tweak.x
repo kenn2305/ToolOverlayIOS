@@ -696,6 +696,32 @@ static void attachGestures(UIImageView *imageView) {
     [imageView addGestureRecognizer:gQuickActionsTapGesture];
 }
 
+static UIWindowScene *activeOverlayWindowScene(void) {
+    UIWindowScene *fallback = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) {
+            continue;
+        }
+        if (scene.activationState == UISceneActivationStateForegroundActive) {
+            return (UIWindowScene *)scene;
+        }
+        if (!fallback) {
+            fallback = (UIWindowScene *)scene;
+        }
+    }
+    return fallback;
+}
+
+static void attachOverlayWindowScene(void) {
+    if (!gOverlayWindow) {
+        return;
+    }
+    UIWindowScene *scene = activeOverlayWindowScene();
+    if (scene && gOverlayWindow.windowScene != scene) {
+        gOverlayWindow.windowScene = scene;
+    }
+}
+
 static void ensureOverlayWindow(void) {
     if (gOverlayWindow || !gOverlayHostReady) {
         return;
@@ -707,6 +733,9 @@ static void ensureOverlayWindow(void) {
     gOverlayWindow.backgroundColor = UIColor.clearColor;
     gOverlayWindow.opaque = NO;
     gOverlayWindow.clipsToBounds = NO;
+    // iOS 13+: cửa sổ PHẢI gắn vào UIWindowScene mới hiển thị được, đồng thời
+    // tránh crash SpringBoard do thao tác trên cửa sổ không có scene.
+    attachOverlayWindowScene();
 
     UIViewController *rootViewController = [UIViewController new];
     rootViewController.view.backgroundColor = UIColor.clearColor;
@@ -1090,6 +1119,7 @@ static void showOverlayImage(UIImage *image) {
         if (!gOverlayWindow) {
             return;
         }
+        attachOverlayWindowScene();
 
         if (!gOverlayImageView) {
             gOverlayImageView = [[UIImageView alloc] initWithFrame:centeredFrameForImage(image)];
@@ -1245,6 +1275,7 @@ static void applyScaleLockMode(BOOL enabled) {
         gOverlayWindow.windowLevel = overlayWindowLevel();
         gOverlayWindow.userInteractionEnabled = YES;
         gOverlayWindow.rootViewController.view.userInteractionEnabled = YES;
+        attachOverlayWindowScene();
         gOverlayWindow.hidden = NO;
         if (!gOverlayWindow.isKeyWindow) {
             gPreviousKeyWindow = currentKeyWindowExcludingOverlay();
