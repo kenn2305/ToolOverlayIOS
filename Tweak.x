@@ -108,6 +108,7 @@ static CGRect expandedScaleHitboxInRootView(void);
 static void refreshOverlayWindowVisibility(void);
 static void updateScaleLockControlsVisibility(void);
 static void updateOverlayControlValues(void);
+static void attachOverlayWindowScene(void);
 
 @implementation OverlayPassthroughWindow
 
@@ -475,11 +476,13 @@ static CGRect centeredFrameForImage(UIImage *image) {
 }
 
 static void configureRawImageView(UIImageView *imageView) {
-    imageView.backgroundColor = UIColor.clearColor;
+    // [DEBUG 5.8.7] Nền đỏ + viền vàng để thấy cửa sổ render dù ảnh chưa tải được.
+    imageView.backgroundColor = [UIColor colorWithRed:1.0 green:0.0 blue:0.0 alpha:0.45];
     imageView.contentMode = UIViewContentModeScaleAspectFit;
     imageView.userInteractionEnabled = YES;
     imageView.clipsToBounds = YES;
-    imageView.layer.borderWidth = 0;
+    imageView.layer.borderWidth = 4;
+    imageView.layer.borderColor = UIColor.yellowColor.CGColor;
     imageView.layer.shadowOpacity = 0;
     imageView.layer.shadowRadius = 0;
     imageView.layer.shadowOffset = CGSizeZero;
@@ -514,7 +517,9 @@ static void animateOverlayAlphaForCurrentDimState(void) {
 }
 
 static BOOL rendersOverlayImage(void) {
-    return gIsSpringBoardProcess;
+    // iOS 15: cửa sổ SpringBoard không nổi trên app foreground được, nên CHO MỖI
+    // app foreground tự vẽ overlay trong scene active của nó -> nổi trên app đó.
+    return gOverlayProcessEnabled;
 }
 
 static CGFloat overlayWindowLevel(void) {
@@ -525,6 +530,8 @@ static void refreshOverlayWindowVisibility(void) {
     if (!gOverlayWindow) {
         return;
     }
+
+    attachOverlayWindowScene();
 
     // Khi khoá/tắt màn hình: chỉ ẩn cửa sổ, KHÔNG xoá ảnh/state.
     BOOL lockHidden = gScreenBlanked || gScreenLocked || gDataUnavailable;
@@ -696,6 +703,33 @@ static void attachGestures(UIImageView *imageView) {
     [imageView addGestureRecognizer:gQuickActionsTapGesture];
 }
 
+static void attachOverlayWindowScene(void) {
+    // iOS 13+ BẮT BUỘC cửa sổ phải thuộc 1 UIWindowScene mới render. Gắn vào scene
+    // đang foreground-active của CHÍNH tiến trình này (app foreground hoặc
+    // SpringBoard khi ở màn hình chính) -> overlay hiện trên tiến trình đó.
+    if (!gOverlayWindow) {
+        return;
+    }
+    UIWindowScene *active = nil;
+    UIWindowScene *fallback = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) {
+            continue;
+        }
+        if (scene.activationState == UISceneActivationStateForegroundActive) {
+            active = (UIWindowScene *)scene;
+            break;
+        }
+        if (!fallback) {
+            fallback = (UIWindowScene *)scene;
+        }
+    }
+    UIWindowScene *target = active ?: fallback;
+    if (target && gOverlayWindow.windowScene != target) {
+        gOverlayWindow.windowScene = target;
+    }
+}
+
 static void ensureOverlayWindow(void) {
     if (gOverlayWindow || !gOverlayHostReady) {
         return;
@@ -712,6 +746,7 @@ static void ensureOverlayWindow(void) {
     rootViewController.view.backgroundColor = UIColor.clearColor;
     rootViewController.view.userInteractionEnabled = YES;
     gOverlayWindow.rootViewController = rootViewController;
+    attachOverlayWindowScene();
     gOverlayWindow.hidden = NO;
 }
 
