@@ -514,7 +514,10 @@ static void animateOverlayAlphaForCurrentDimState(void) {
 }
 
 static BOOL rendersOverlayImage(void) {
-    return gIsSpringBoardProcess;
+    // MỌI tiến trình có tweak (SpringBoard + mọi app) đều TỰ VẼ overlay trong
+    // process của mình -> overlay nổi ngay trên app đang mở (kiểu Snapper2),
+    // thay vì chỉ vẽ ở SpringBoard (nằm sau app nên không thấy).
+    return gOverlayProcessEnabled;
 }
 
 static CGFloat overlayWindowLevel(void) {
