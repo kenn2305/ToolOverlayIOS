@@ -726,6 +726,8 @@ static UIButton *quickActionsButton(NSString *title, SEL action) {
 
 static void showOverlayQuickActions(void) {
     if (gScaleLockModeEnabled || gQuickActionsVisible || !gOverlayRoot) {
+        overlayLog(@"showOverlayQuickActions BO QUA (scaleLock=%d visible=%d root=%d)",
+                   gScaleLockModeEnabled, gQuickActionsVisible, gOverlayRoot != nil);
         return;
     }
 
@@ -812,6 +814,7 @@ static void attachGestures(UIImageView *imageView) {
 
     gImagePanGesture = [[UIPanGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handlePan:)];
     gImagePanGesture.maximumNumberOfTouches = 1;
+    gImagePanGesture.cancelsTouchesInView = NO;   // để tap luôn kết thúc bằng Ended -> nhận panel
     gImagePanGesture.delegate = gGestureHandler;
     [imageView addGestureRecognizer:gImagePanGesture];
 
@@ -1693,42 +1696,40 @@ static void overlayHandleManualTap(UIEvent *event) {
     }
 
     NSUInteger activeCount = 0;
-    UITouch *anyTouch = nil;
-    UITouch *endedTouch = nil;
+    BOOL anyEnded = NO;
+    UITouch *activeTouch = nil;
     for (UITouch *touch in event.allTouches) {
-        if (touch.phase == UITouchPhaseEnded) {
-            endedTouch = touch;
-        }
         if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
+            anyEnded = YES;
             continue;
         }
         activeCount++;
-        anyTouch = touch;
+        activeTouch = touch;
     }
 
-    if (anyTouch && anyTouch.phase == UITouchPhaseBegan) {
-        // Bắt đầu 1 ngón: chỉ là ứng viên tap nếu đặt TRÊN ảnh.
-        gTapCandidate = touchInsideOverlayImage(anyTouch);
-        gTapStart = [anyTouch locationInView:gOverlayRoot];
-        return;
-    }
-
-    if (anyTouch && anyTouch.phase == UITouchPhaseMoved && gTapCandidate) {
-        CGPoint p = [anyTouch locationInView:gOverlayRoot];
-        CGFloat dx = p.x - gTapStart.x;
-        CGFloat dy = p.y - gTapStart.y;
-        if (dx * dx + dy * dy > 18.0 * 18.0) {
-            gTapCandidate = NO;   // đã kéo -> không phải tap
+    if (activeTouch) {
+        if (activeTouch.phase == UITouchPhaseBegan) {
+            // Bắt đầu 1 ngón: chỉ là ứng viên tap nếu đặt TRÊN ảnh.
+            gTapCandidate = touchInsideOverlayImage(activeTouch);
+            gTapStart = [activeTouch locationInView:gOverlayRoot];
+        } else if (gTapCandidate) {
+            CGPoint p = [activeTouch locationInView:gOverlayRoot];
+            CGFloat dx = p.x - gTapStart.x;
+            CGFloat dy = p.y - gTapStart.y;
+            if (dx * dx + dy * dy > 24.0 * 24.0) {
+                gTapCandidate = NO;   // đã kéo -> không phải tap
+            }
         }
         return;
     }
 
-    // Nhấc ngón cuối: nếu vẫn là tap hợp lệ (không kéo, không giữ-lâu, không nhúm) -> panel.
-    if (endedTouch && activeCount == 0) {
-        BOOL valid = gTapCandidate && !gLongPressConsumed && !gManualPinchActive &&
-                     touchInsideOverlayImage(endedTouch);
+    // Đã nhấc hết tay (Ended HOẶC Cancelled - pan recognizer có thể đổi phase thành
+    // Cancelled). Vẫn là tap hợp lệ (chạm trên ảnh, không kéo/giữ-lâu/nhúm) -> hiện panel.
+    if (anyEnded && activeCount == 0) {
+        BOOL fire = gTapCandidate && !gLongPressConsumed && !gManualPinchActive;
         gTapCandidate = NO;
-        if (valid) {
+        if (fire) {
+            overlayLog(@"manual tap tren anh -> hien panel nap/rut");
             showOverlayQuickActions();
         }
     }
