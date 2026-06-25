@@ -591,10 +591,13 @@ static CGRect centeredFrameForImage(UIImage *image) {
         return CGRectInset(bounds, bounds.size.width * 0.2, bounds.size.height * 0.35);
     }
 
+    // Căn để ảnh lấp ~72% màn theo cạnh giới hạn. CHO PHÉP phóng to ảnh nhỏ (vd nguồn
+    // 52x44) lên cỡ dùng được - trước đây kẹp scale <=1.0 khiến ảnh nhỏ giữ nguyên tí
+    // xíu -> không bấm/nhúm trúng (bấm trượt thành "ngoài ảnh" -> dim thay vì panel).
     CGFloat maxWidth = bounds.size.width * 0.72;
     CGFloat maxHeight = bounds.size.height * 0.72;
     CGFloat scale = MIN(maxWidth / imageSize.width, maxHeight / imageSize.height);
-    scale = MIN(MAX(scale, 0.08), 1.0);
+    scale = MIN(MAX(scale, 0.08), 16.0);
 
     CGSize overlaySize = CGSizeMake(imageSize.width * scale, imageSize.height * scale);
     return CGRectMake((bounds.size.width - overlaySize.width) / 2.0,
@@ -1845,10 +1848,17 @@ static void registerOverlayNotification(void) {
             }
             CGPoint p = CGPointMake((double)(uint32_t)(packed >> 32),
                                     (double)(uint32_t)(packed & 0xFFFFFFFFu));
-            if (gOverlayImageView && !gScaleLockModeEnabled && pointInsideOverlayImage(p)) {
+            BOOL onImage = NO;
+            if (gOverlayImageView && gOverlayVisible && !gOverlayImageView.hidden && !gScaleLockModeEnabled) {
+                // Dung sai 28pt quanh ảnh -> bấm gần mép vẫn mở panel (ảnh có thể nhỏ).
+                CGRect zone = CGRectInset(gOverlayImageView.frame, -28.0, -28.0);
+                onImage = CGRectContainsPoint(zone, p) || pointInsideOverlayImage(p);
+            }
+            if (onImage) {
                 overlayLog(@"app-touch TRUNG anh (%.0f,%.0f) -> panel nap/rut", p.x, p.y);
                 showOverlayQuickActions();
             } else {
+                overlayLog(@"app-touch NGOAI anh (%.0f,%.0f) -> dim", p.x, p.y);
                 scheduleToggleOverlayVisibility();
             }
         });
