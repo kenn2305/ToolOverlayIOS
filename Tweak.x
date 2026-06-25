@@ -32,8 +32,11 @@ static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.se
 static const char *kOverlayStateNotification = "com.vietanh.overlayiostool.state-updated";
 static const char *kOverlayDepositActionNotification = "com.vietanh.overlayiostool.action.deposit";
 static const char *kOverlayWithdrawActionNotification = "com.vietanh.overlayiostool.action.withdraw";
-// Toggle-click xuyên app: app chỉ phát hiện chạm (ngoài ảnh) -> báo SpringBoard.
+// Toggle-click xuyên app: app phát hiện chạm + gửi TOẠ ĐỘ -> SpringBoard tự quyết
+// (trúng ảnh -> panel nạp/rút; ngoài ảnh -> dim) vì app không biết vị trí ảnh.
 static const char *kOverlayAppTouchNotification = "com.vietanh.overlayiostool.app-touch";
+// Kênh state mang toạ độ chạm (x<<32 | y, theo điểm màn hình) từ app sang SpringBoard.
+static const char *kOverlayAppTouchLocState = "com.vietanh.overlayiostool.app-touch-loc";
 // Kênh state (notify_set_state/get_state, không dính sandbox) để app biết có cần relay.
 static const char *kOverlayToggleActiveState = "com.vietanh.overlayiostool.toggle-active";
 static const char *kOverlayRealtimeSocketPath = "/var/mobile/Library/OverlayIOSTOOL/realtime.sock";
@@ -113,6 +116,7 @@ static int gLockStateToken = 0;
 static int gAppTouchToken = 0;          // SpringBoard: nhận tín hiệu chạm từ app
 static int gSbToggleStateToken = 0;     // SpringBoard: set state toggle-active
 static int gAppToggleStateToken = 0;    // App: đọc state toggle-active
+static int gAppTouchLocToken = 0;       // App: set toạ độ chạm; SpringBoard: đọc toạ độ chạm
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -312,8 +316,9 @@ static BOOL shouldRelayAppTouches(void) {
            [bundlePath hasPrefix:@"/private/var/jb/Applications/"];
 }
 
-// SpringBoard công bố: "toggle-click đang hiệu lực" (ảnh hiện + bật toggle + không
-// scale-lock) qua notify state. App đọc state này để biết có cần relay chạm hay không.
+// SpringBoard công bố "overlay đang tương tác" (ảnh hiện + chế độ thường) qua notify
+// state. App đọc để biết có cần relay chạm hay không. KHÔNG phụ thuộc toggle-click vì
+// chạm trên ảnh phải mở panel kể cả khi toggle TẮT (SpringBoard tự quyết panel/dim).
 static void updateToggleActiveState(void) {
     if (!gIsSpringBoardProcess) {
         return;
@@ -321,7 +326,7 @@ static void updateToggleActiveState(void) {
     if (gSbToggleStateToken == 0) {
         notify_register_check(kOverlayToggleActiveState, &gSbToggleStateToken);
     }
-    BOOL active = gToggleClickEnabled && gOverlayImageView && gOverlayVisible && !gScaleLockModeEnabled;
+    BOOL active = gOverlayImageView && gOverlayVisible && !gScaleLockModeEnabled;
     notify_set_state(gSbToggleStateToken, active ? 1 : 0);
     notify_post(kOverlayToggleActiveState);
 }
@@ -1830,9 +1835,22 @@ static void registerOverlayNotification(void) {
             refreshOverlayWindowVisibility();
         });
 
-        // App thứ ba báo "có chạm ngoài ảnh" -> toggle dim ảnh (toggle-click xuyên app).
+        // App thứ ba báo "có chạm" kèm toạ độ. SpringBoard biết vị trí ảnh nên tự quyết:
+        // trúng ảnh -> hiện panel nạp/rút (KHÔNG dim); ngoài ảnh -> toggle dim.
+        notify_register_check(kOverlayAppTouchLocState, &gAppTouchLocToken);
         notify_register_dispatch(kOverlayAppTouchNotification, &gAppTouchToken, dispatch_get_main_queue(), ^(__unused int token) {
-            scheduleToggleOverlayVisibility();
+            uint64_t packed = 0;
+            if (gAppTouchLocToken != 0) {
+                notify_get_state(gAppTouchLocToken, &packed);
+            }
+            CGPoint p = CGPointMake((double)(uint32_t)(packed >> 32),
+                                    (double)(uint32_t)(packed & 0xFFFFFFFFu));
+            if (gOverlayImageView && !gScaleLockModeEnabled && pointInsideOverlayImage(p)) {
+                overlayLog(@"app-touch TRUNG anh (%.0f,%.0f) -> panel nap/rut", p.x, p.y);
+                showOverlayQuickActions();
+            } else {
+                scheduleToggleOverlayVisibility();
+            }
         });
 
         // Công bố state ban đầu cho các app đọc.
@@ -2034,12 +2052,19 @@ static void scheduleActivationRetry(int attempt) {
 - (void)sendEvent:(UIEvent *)event {
     if (!gOverlayProcessEnabled) {
         %orig(event);
-        // App relay: cú chạm lọt tới app = chạm NGOÀI ảnh (vùng ảnh bị cửa sổ
-        // SpringBoard nuốt). Nếu toggle-click đang hiệu lực -> báo SpringBoard dim.
+        // App relay: gửi TOẠ ĐỘ cú chạm sang SpringBoard. SpringBoard biết vị trí ảnh
+        // nên tự quyết: trúng ảnh -> hiện panel nạp/rút (KHÔNG dim); ngoài ảnh -> dim.
         if (gAppTouchRelayEnabled && event.type == UIEventTypeTouches) {
             for (UITouch *touch in event.allTouches) {
                 if (touch.phase == UITouchPhaseBegan) {
                     if (overlayToggleActiveForApp()) {
+                        CGPoint p = [touch locationInView:nil];   // toạ độ cửa sổ = màn hình (app full-screen)
+                        uint32_t xi = (uint32_t)MAX(0.0, p.x);
+                        uint32_t yi = (uint32_t)MAX(0.0, p.y);
+                        uint64_t packed = ((uint64_t)xi << 32) | (uint64_t)yi;
+                        if (gAppTouchLocToken != 0) {
+                            notify_set_state(gAppTouchLocToken, packed);
+                        }
                         notify_post(kOverlayAppTouchNotification);
                     }
                     break;
@@ -2138,6 +2163,7 @@ static void scheduleActivationRetry(int attempt) {
         // App relay: chỉ cần hook sendEvent + token đọc state. KHÔNG vẽ, KHÔNG đọc file.
         if (gAppTouchRelayEnabled) {
             notify_register_check(kOverlayToggleActiveState, &gAppToggleStateToken);
+            notify_register_check(kOverlayAppTouchLocState, &gAppTouchLocToken);
             NSLog(@"[OverlayIOSTOOL] App touch relay in %@", bundleIdentifier ?: NSProcessInfo.processInfo.processName);
             return;
         }
