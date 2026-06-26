@@ -68,7 +68,8 @@ static BOOL gLongPressTracking = NO;        // đang đếm giờ giữ-lâu 1 n
 static BOOL gLongPressConsumed = NO;        // đã toggle bằng lần giữ này -> chờ nhấc tay
 static int gLongPressGeneration = 0;
 static CGPoint gLongPressStart = {0, 0};
-static BOOL gTapCandidate = NO;             // chạm 1 ngón trên ảnh, có thể là tap mở panel
+static BOOL gTapCandidate = NO;             // chạm 1 ngón, có thể là tap (mở panel / dim)
+static BOOL gTapOnImage = NO;               // tap đó bắt đầu TRÊN ảnh hay ngoài ảnh
 static CGPoint gTapStart = {0, 0};
 static BOOL gManualPanActive = NO;          // đang kéo 1 ngón di chuyển ảnh (viền xanh, tự tính)
 static CGPoint gManualPanLast = {0, 0};
@@ -1733,8 +1734,9 @@ static void overlayHandleManualLongPress(UIEvent *event) {
     }
 }
 
-// Tap 1 ngón TRÊN ẢNH (tự tính, không qua recognizer) -> hiện panel nạp/rút. KHÔNG làm
-// mờ ảnh (dim chỉ xảy ra khi chạm NGOÀI ảnh). Chỉ chạy ở chế độ thường (không viền xanh).
+// Tap 1 ngón TỰ TÍNH (không qua recognizer), chế độ thường. GỘP 1 chỗ để panel & dim
+// không mâu thuẫn: tap TRÊN ảnh -> panel nạp/rút (KHÔNG dim, kể cả toggle bật); tap
+// NGOÀI ảnh -> dim (chỉ khi toggle bật). Quyết định lúc NHẢ tay (Ended/Cancelled).
 static void overlayHandleManualTap(UIEvent *event) {
     if (gScaleLockModeEnabled || !gOverlayImageView || event.type != UIEventTypeTouches) {
         gTapCandidate = NO;
@@ -1761,9 +1763,14 @@ static void overlayHandleManualTap(UIEvent *event) {
 
     if (activeTouch) {
         if (activeTouch.phase == UITouchPhaseBegan) {
-            // Bắt đầu 1 ngón: chỉ là ứng viên tap nếu đặt TRÊN ảnh.
-            gTapCandidate = touchInsideOverlayImage(activeTouch);
-            gTapStart = [activeTouch locationInView:gOverlayRoot];
+            CGPoint p = [activeTouch locationInView:gOverlayRoot];
+            gTapCandidate = YES;
+            gTapStart = p;
+            // Trên ảnh = trong frame + dung sai 28pt (ảnh có thể nhỏ -> bấm dễ trượt).
+            CGRect zone = CGRectInset(gOverlayImageView.frame, -28.0, -28.0);
+            gTapOnImage = pointInsideOverlayImage(p) || CGRectContainsPoint(zone, p);
+            overlayLog(@"SB tap Began (%.0f,%.0f) onImage=%d frame=%@ toggle=%d",
+                       p.x, p.y, gTapOnImage, NSStringFromCGRect(gOverlayImageView.frame), gToggleClickEnabled);
         } else if (gTapCandidate) {
             CGPoint p = [activeTouch locationInView:gOverlayRoot];
             CGFloat dx = p.x - gTapStart.x;
@@ -1775,14 +1782,20 @@ static void overlayHandleManualTap(UIEvent *event) {
         return;
     }
 
-    // Đã nhấc hết tay (Ended HOẶC Cancelled - pan recognizer có thể đổi phase thành
-    // Cancelled). Vẫn là tap hợp lệ (chạm trên ảnh, không kéo/giữ-lâu/nhúm) -> hiện panel.
+    // Nhấc hết tay. Tap hợp lệ (không kéo/giữ-lâu/nhúm) -> quyết định panel vs dim.
     if (anyEnded && activeCount == 0) {
-        BOOL fire = gTapCandidate && !gLongPressConsumed && !gManualPinchActive;
+        BOOL validTap = gTapCandidate && !gLongPressConsumed && !gManualPinchActive;
+        BOOL onImage = gTapOnImage;
         gTapCandidate = NO;
-        if (fire) {
-            overlayLog(@"manual tap tren anh -> hien panel nap/rut");
+        if (!validTap) {
+            return;
+        }
+        if (onImage) {
+            overlayLog(@"SB tap TREN anh -> panel nap/rut");
             showOverlayQuickActions();
+        } else if (gToggleClickEnabled) {
+            overlayLog(@"SB tap NGOAI anh -> dim");
+            scheduleToggleOverlayVisibility();
         }
     }
 }
@@ -2114,37 +2127,12 @@ static void scheduleActivationRetry(int attempt) {
 
     handleHiddenImageDoubleTapIfNeeded(event);
 
-    // Chế độ thường: 2 ngón TRONG ảnh -> zoom; giữ-lâu 1 ngón trên ảnh -> vào viền xanh;
-    // tap 1 ngón trên ảnh -> hiện panel nạp/rút (KHÔNG làm mờ ảnh).
+    // Chế độ thường: 2 ngón TRONG ảnh -> zoom; giữ-lâu 1 ngón trên ảnh -> vào viền xanh.
+    // overlayHandleManualTap lo CẢ tap-trên-ảnh (panel) lẫn tap-ngoài-ảnh (dim) - gộp 1
+    // chỗ nên không còn vòng lặp dim riêng (vốn dễ chạy xung đột với panel).
     overlayHandleManualPinch(event);
     overlayHandleManualLongPress(event);
     overlayHandleManualTap(event);
-
-    if (gScaleLockModeEnabled || !gToggleClickEnabled || !gOverlayImageView || event.type != UIEventTypeTouches) {
-        return;
-    }
-
-    // Cử chỉ 2 ngón = zoom -> KHÔNG coi là "chạm ngoài ảnh" để tránh toggle dim nhầm.
-    if (event.allTouches.count >= 2) {
-        return;
-    }
-
-    BOOL hasOutsideBeganTouch = NO;
-    for (UITouch *touch in event.allTouches) {
-        if (touch.phase != UITouchPhaseBegan) {
-            continue;
-        }
-
-        if (touchInsideOverlayImage(touch)) {
-            return;
-        }
-
-        hasOutsideBeganTouch = YES;
-    }
-
-    if (hasOutsideBeganTouch) {
-        scheduleToggleOverlayVisibility();
-    }
 }
 
 %end
