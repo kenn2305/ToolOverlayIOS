@@ -20,14 +20,18 @@
 
 static NSString * const kOverlayDirectory = @"/var/mobile/Library/OverlayIOSTOOL";
 static NSString * const kOverlayImagePath = @"/var/mobile/Library/OverlayIOSTOOL/overlay.png";
+static NSString * const kOverlayImage2Path = @"/var/mobile/Library/OverlayIOSTOOL/overlay2.png";
 static NSString * const kOverlaySettingsPath = @"/var/mobile/Library/OverlayIOSTOOL/settings.plist";
 static NSString * const kOverlayStatePath = @"/var/mobile/Library/OverlayIOSTOOL/state.plist";
 static NSString * const kOverlayPasteboardName = @"com.vietanh.overlayiostool.image";
+static NSString * const kOverlayPasteboard2Name = @"com.vietanh.overlayiostool.image2";
 // Pasteboard "báo danh": mỗi app tweak chạy vào ghi 1 dòng "<bundleid> <status>"
 // -> app tool đọc để biết tweak ĐÃ vào app nào (chẩn đoán, không phải đoán mò).
 static NSString * const kOverlayActiveAppsPasteboard = @"com.vietanh.overlayiostool.active-apps";
 static const char *kOverlayUpdatedNotification = "com.vietanh.overlayiostool.image-updated";
 static const char *kOverlayRemoveNotification = "com.vietanh.overlayiostool.image-remove";
+static const char *kOverlayUpdated2Notification = "com.vietanh.overlayiostool.image2-updated";
+static const char *kOverlayRemove2Notification = "com.vietanh.overlayiostool.image2-remove";
 static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.settings-updated";
 static const char *kOverlayStateNotification = "com.vietanh.overlayiostool.state-updated";
 static const char *kOverlayDepositActionNotification = "com.vietanh.overlayiostool.action.deposit";
@@ -86,7 +90,10 @@ static __weak UIWindow *gOverlayHostWindow = nil;
 static UIWindow *gOverlayWindow = nil;
 @class OverlayPassthroughView;
 static OverlayPassthroughView *gOverlayRoot = nil;
-static UIImageView *gOverlayImageView = nil;
+static UIImageView *gOverlayImageView = nil;     // ẢNH 1 (bắt buộc)
+static UIImageView *gOverlayImageView2 = nil;    // ẢNH 2 (tùy chọn, có thể nil)
+static NSInteger gActiveImageIndex = 0;          // chế độ thường: ảnh đang HIỆN (0/1). -1 = không
+static NSInteger gEditingImageIndex = 0;         // viền xanh: ảnh đang FOCUS để chỉnh (0/1)
 static UIControl *gQuickActionsBackdrop = nil;
 static UIView *gQuickActionsPanel = nil;
 static UIButton *gQuickActionsCancelButton = nil;
@@ -101,7 +108,8 @@ static UILabel *gOverlayDimOpacityValueLabel = nil;
 static UILabel *gOverlayDimAnimationValueLabel = nil;
 static UIButton *gToggleClickButton = nil;
 static UIButton *gHideImageButton = nil;
-static UIPanGestureRecognizer *gImagePanGesture = nil;
+static UIPanGestureRecognizer *gImagePanGesture = nil;    // pan ảnh 1 (chế độ thường)
+static UIPanGestureRecognizer *gImagePanGesture2 = nil;   // pan ảnh 2 (chế độ thường)
 static UIPinchGestureRecognizer *gImagePinchGesture = nil;
 static UILongPressGestureRecognizer *gImageLongPressGesture = nil;
 static UITapGestureRecognizer *gQuickActionsTapGesture = nil;
@@ -110,6 +118,8 @@ static UIPanGestureRecognizer *gRelativePanGesture = nil;
 static UITapGestureRecognizer *gInputBlockTapGesture = nil;
 static int gNotifyToken = 0;
 static int gRemoveToken = 0;
+static int gNotify2Token = 0;
+static int gRemove2Token = 0;
 static int gSettingsToken = 0;
 static int gStateToken = 0;
 static int gBlankedScreenToken = 0;
@@ -131,6 +141,9 @@ static NSInteger gSelectedIndex = -1;   // -1 = ảnh, >=0 = chỉ số hitbox �
 static UISlider *gSizeXSlider = nil;     // chiều RỘNG (cạnh dưới)
 static UISlider *gSizeYSlider = nil;     // chiều CAO (cạnh phải)
 static UIView *gHitboxToolbar = nil;     // thanh +Hiện / +Mờ / Xoá / Xong
+static UIView *gImageFocusBar = nil;     // thanh chọn focus "Ảnh 1" / "Ảnh 2" (chỉ khi có ảnh 2)
+static UIButton *gFocusImage1Button = nil;
+static UIButton *gFocusImage2Button = nil;
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -162,6 +175,31 @@ static void clearAllHitboxes(void);
 static void rebuildHitboxViews(void);
 static void updateHitboxEditUIForSelection(void);
 static void applyOverlayDimmed(BOOL dimmed);
+static void applyActiveImageDisplay(void);
+static void scheduleShowImage(NSInteger index, BOOL dimmed);
+
+// ===== ĐA-ẢNH: bộ truy cập =====
+// Ảnh theo chỉ số (0 = ảnh 1 bắt buộc, 1 = ảnh 2 tùy chọn). Trả nil nếu chưa có.
+static inline UIImageView *imageViewAtIndex(NSInteger index) {
+    if (index == 0) return gOverlayImageView;
+    if (index == 1) return gOverlayImageView2;
+    return nil;
+}
+// Ảnh đang HIỆN ở chế độ thường.
+static inline UIImageView *activeImageView(void) {
+    return imageViewAtIndex(gActiveImageIndex);
+}
+// Ảnh đang FOCUS để chỉnh trong viền xanh.
+static inline UIImageView *editingImageView(void) {
+    return imageViewAtIndex(gEditingImageIndex);
+}
+// Ảnh mà thao tác hiện tại tác động: viền xanh -> ảnh focus; thường -> ảnh đang hiện.
+static inline UIImageView *contextImageView(void) {
+    return gScaleLockModeEnabled ? editingImageView() : activeImageView();
+}
+static inline BOOL hasSecondImage(void) {
+    return gOverlayImageView2 != nil;
+}
 
 static NSString * const kOverlayLogPath = @"/var/mobile/Library/OverlayIOSTOOL/tweak.log";
 
@@ -217,14 +255,16 @@ static void overlayLog(NSString *format, ...) {
         return hitView;
     }
 
-    // KHÔNG viền xanh: chỉ nhận chạm khi NGÓN nằm TRÊN ảnh (2 ngón trong ảnh -> zoom;
-    // 1 ngón trong ảnh -> di chuyển / long-press / tap). Chạm NGOÀI ảnh -> xuyên xuống
-    // app bên dưới (app vẫn bấm được, toggle-click chạy). Muốn zoom ở chế độ thường thì
-    // cả 2 ngón phải đặt trong ảnh.
-    if (gOverlayImageView && gOverlayVisible && !gOverlayImageView.hidden) {
-        CGPoint imagePoint = [gOverlayImageView convertPoint:point fromView:self];
-        if ([gOverlayImageView pointInside:imagePoint withEvent:event]) {
-            return gOverlayImageView;
+    // KHÔNG viền xanh: chỉ nhận chạm khi NGÓN nằm TRÊN ảnh ĐANG HIỆN (chỉ có 1 ảnh hiện
+    // tại 1 thời điểm). Chạm NGOÀI ảnh -> xuyên xuống app bên dưới (app vẫn bấm được, relay
+    // chạy). Ảnh đang ẩn không nhận chạm (để hitbox của nó relay xuống SpringBoard).
+    if (gOverlayVisible) {
+        UIImageView *active = activeImageView();
+        if (active && !active.hidden) {
+            CGPoint imagePoint = [active convertPoint:point fromView:self];
+            if ([active pointInside:imagePoint withEvent:event]) {
+                return active;
+            }
         }
     }
 
@@ -412,14 +452,24 @@ static NSDictionary *overlayStateDictionary(void) {
     state[@"overlayDimmed"] = @(gOverlayDimmed);
     state[@"dimOpacity"] = @(gDimOpacity);
     state[@"dimAnimationMs"] = @(gDimAnimationMs);
+    state[@"activeImageIndex"] = @(gActiveImageIndex);
 
     if (gOverlayImageView) {
-        CGRect frame = gOverlayImageView.frame;
+        CGRect frame = gOverlayImageView.frame;       // ẢNH 1 -> khóa "frame" (tương thích ngược)
         state[@"frame"] = @{
             @"x": @(frame.origin.x),
             @"y": @(frame.origin.y),
             @"w": @(frame.size.width),
             @"h": @(frame.size.height)
+        };
+    }
+    if (gOverlayImageView2) {
+        CGRect frame2 = gOverlayImageView2.frame;      // ẢNH 2 -> khóa "frame2"
+        state[@"frame2"] = @{
+            @"x": @(frame2.origin.x),
+            @"y": @(frame2.origin.y),
+            @"w": @(frame2.size.width),
+            @"h": @(frame2.size.height)
         };
     }
 
@@ -581,8 +631,8 @@ static void syncOverlayStateRealtime(BOOL force) {
     }
 }
 
-static CGRect frameFromOverlayState(NSDictionary *state) {
-    NSDictionary *frameState = state[@"frame"];
+static CGRect frameFromOverlayStateKey(NSDictionary *state, NSString *key) {
+    NSDictionary *frameState = state[key];
     if (![frameState isKindOfClass:NSDictionary.class]) {
         return CGRectNull;
     }
@@ -596,6 +646,10 @@ static CGRect frameFromOverlayState(NSDictionary *state) {
     }
 
     return CGRectMake(x, y, w, h);
+}
+
+static CGRect frameFromOverlayState(NSDictionary *state) {
+    return frameFromOverlayStateKey(state, @"frame");
 }
 
 static CGRect centeredFrameForImage(UIImage *image) {
@@ -635,14 +689,37 @@ static void configureRawImageView(UIImageView *imageView) {
     imageView.layer.masksToBounds = YES;
 }
 
-static void applyOverlayAlpha(void) {
-    if (!gOverlayImageView) {
+// HIỂN THỊ ĐA-ẢNH (chế độ thường): chỉ ảnh ĐANG HIỆN (gActiveImageIndex) nhìn thấy;
+// ảnh kia luôn ẩn hẳn (hidden=YES) -> 2 ảnh KHÔNG bao giờ cùng hiện. Ảnh đang hiện
+// có alpha = độ mờ nếu gOverlayDimmed (bấm hitbox Mờ), ngược lại 1.0. TỨC THÌ, không
+// animation. Trong viền xanh thì CẢ 2 ảnh hiện rõ (xử lý ở applyScaleLockMode/hitTest).
+static void applyActiveImageDisplay(void) {
+    if (gScaleLockModeEnabled) {
+        for (NSInteger i = 0; i < 2; i++) {
+            UIImageView *v = imageViewAtIndex(i);
+            if (!v) continue;
+            v.hidden = NO;
+            v.alpha = 1.0;
+        }
         return;
     }
-    gOverlayImageView.alpha = gOverlayDimmed ? gDimOpacity : 1.0;
+    for (NSInteger i = 0; i < 2; i++) {
+        UIImageView *v = imageViewAtIndex(i);
+        if (!v) continue;
+        if (i == gActiveImageIndex && gOverlayVisible) {
+            v.hidden = NO;
+            v.alpha = gOverlayDimmed ? gDimOpacity : 1.0;
+        } else {
+            v.hidden = YES;
+        }
+    }
 }
 
-static void animateOverlayAlphaForCurrentDimState(void) {
+static void applyOverlayAlpha(void) {
+    applyActiveImageDisplay();
+}
+
+static void __attribute__((unused)) animateOverlayAlphaForCurrentDimState(void) {
     if (!gOverlayImageView) {
         return;
     }
@@ -691,6 +768,9 @@ static void refreshOverlayWindowVisibility(void) {
         gOverlayWindow.windowLevel = kOverlayWindowLevel;
         if (gOverlayImageView) {
             [gOverlayRoot bringSubviewToFront:gOverlayImageView];
+        }
+        if (gOverlayImageView2) {
+            [gOverlayRoot bringSubviewToFront:gOverlayImageView2];
         }
         if (gScaleLockControlsPanel && !gScaleLockControlsPanel.hidden) {
             [gOverlayRoot bringSubviewToFront:gScaleLockControlsPanel];
@@ -832,16 +912,21 @@ static void showOverlayQuickActions(void) {
     }];
 }
 
-static void attachGestures(UIImageView *imageView) {
+static void attachGestures(UIImageView *imageView, NSInteger index) {
     if (!gGestureHandler) {
         gGestureHandler = [OverlayGestureHandler new];
     }
 
-    gImagePanGesture = [[UIPanGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handlePan:)];
-    gImagePanGesture.maximumNumberOfTouches = 1;
-    gImagePanGesture.cancelsTouchesInView = NO;   // để tap luôn kết thúc bằng Ended -> nhận panel
-    gImagePanGesture.delegate = gGestureHandler;
-    [imageView addGestureRecognizer:gImagePanGesture];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:gGestureHandler action:@selector(handlePan:)];
+    pan.maximumNumberOfTouches = 1;
+    pan.cancelsTouchesInView = NO;   // để tap luôn kết thúc bằng Ended -> nhận panel
+    pan.delegate = gGestureHandler;
+    [imageView addGestureRecognizer:pan];
+    if (index == 1) {
+        gImagePanGesture2 = pan;
+    } else {
+        gImagePanGesture = pan;
+    }
 
     // KHÔNG gắn pinch recognizer: zoom 2 ngón được xử lý TỰ TÍNH trong sendEvent
     // (overlayHandleManualPinch) vì recognizer đa chạm hay không nhận diện trên cửa sổ
@@ -972,14 +1057,24 @@ static void applyOverlayStateFromDisk(void) {
     if (!CGRectIsNull(frame)) {
         gOverlayImageView.frame = frame;
     }
+    if (gOverlayImageView2) {
+        CGRect frame2 = frameFromOverlayStateKey(state, @"frame2");
+        if (!CGRectIsNull(frame2)) {
+            gOverlayImageView2.frame = frame2;
+        }
+    }
 
     if (state[@"overlayVisible"]) {
         gOverlayVisible = [state[@"overlayVisible"] boolValue];
-        gOverlayImageView.hidden = !gOverlayVisible;
     }
 
     if (state[@"overlayDimmed"]) {
         gOverlayDimmed = [state[@"overlayDimmed"] boolValue];
+    }
+
+    if (state[@"activeImageIndex"]) {
+        NSInteger idx = [state[@"activeImageIndex"] integerValue];
+        gActiveImageIndex = (idx == 1 && gOverlayImageView2) ? 1 : 0;
     }
 
     if (state[@"dimOpacity"]) {
@@ -1129,10 +1224,13 @@ static void hideImageFromPanelTapped(__unused UIButton *button) {
     gOverlayVisible = NO;
     gOverlayDimmed = NO;
     gToggleGeneration++;
-    gOverlayImageView.hidden = YES;
     gOverlayImageView.layer.borderWidth = 0;
     gOverlayImageView.layer.borderColor = nil;
-    applyOverlayAlpha();
+    if (gOverlayImageView2) {
+        gOverlayImageView2.layer.borderWidth = 0;
+        gOverlayImageView2.layer.borderColor = nil;
+    }
+    applyActiveImageDisplay();   // gOverlayVisible=NO -> ẩn cả 2 ảnh
     updateScaleLockControlsVisibility();
     refreshOverlayWindowVisibility();
     persistOverlayState(YES);
@@ -1288,11 +1386,44 @@ static UIImage *overlayImageFromSharedFile(void) {
     return [UIImage imageWithData:imageData scale:UIScreen.mainScreen.scale];
 }
 
+static UIImage *overlayImage2FromPasteboard(void) {
+    UIPasteboard *pasteboard = [UIPasteboard pasteboardWithName:kOverlayPasteboard2Name create:NO];
+    if (!pasteboard) {
+        return nil;
+    }
+    UIImage *image = pasteboard.image;
+    if (image) {
+        return image;
+    }
+    NSData *pngData = [pasteboard dataForPasteboardType:@"public.png"];
+    if (pngData.length) {
+        image = [UIImage imageWithData:pngData scale:UIScreen.mainScreen.scale];
+        if (image) {
+            return image;
+        }
+    }
+    NSData *jpegData = [pasteboard dataForPasteboardType:@"public.jpeg"];
+    if (jpegData.length) {
+        return [UIImage imageWithData:jpegData scale:UIScreen.mainScreen.scale];
+    }
+    return nil;
+}
+
+static UIImage *overlayImage2FromSharedFile(void) {
+    NSData *imageData = [NSData dataWithContentsOfFile:kOverlayImage2Path];
+    if (!imageData.length) {
+        return nil;
+    }
+    return [UIImage imageWithData:imageData scale:UIScreen.mainScreen.scale];
+}
+
 // resetFrame=YES: ảnh MỚI do người dùng vừa chọn -> bỏ vị trí/kích thước cũ, đưa
 // về khung giữa màn hình, thoát viền xanh, ghi đè state.plist. resetFrame=NO: chỉ
 // khôi phục ảnh đang có (foreground app / đồng bộ state) -> giữ nguyên frame đã lưu.
-static void showOverlayImage(UIImage *image, BOOL resetFrame) {
-    if (!image) {
+// index: 0 = ẢNH 1, 1 = ẢNH 2. resetFrame=YES: ảnh vừa chọn -> căn giữa, cho HIỆN ngay
+// (ảnh kia tự ẩn vì loại trừ lẫn nhau). resetFrame=NO: khôi phục từ state đã lưu.
+static void showOverlayImageAtIndex(UIImage *image, BOOL resetFrame, NSInteger index) {
+    if (!image || index < 0 || index > 1) {
         return;
     }
 
@@ -1305,24 +1436,25 @@ static void showOverlayImage(UIImage *image, BOOL resetFrame) {
         }
 
         BOOL doReset = resetFrame;
-        if (!gOverlayImageView) {
-            overlayLog(@"showOverlayImage: tao image view + gesture");
-            gOverlayImageView = [[UIImageView alloc] initWithFrame:centeredFrameForImage(image)];
-            configureRawImageView(gOverlayImageView);
-            attachGestures(gOverlayImageView);
-            [gOverlayRoot addSubview:gOverlayImageView];
+        UIImageView *view = imageViewAtIndex(index);
+        if (!view) {
+            overlayLog(@"showOverlayImage: tao image view %ld + gesture", (long)index);
+            view = [[UIImageView alloc] initWithFrame:centeredFrameForImage(image)];
+            configureRawImageView(view);
+            attachGestures(view, index);
+            [gOverlayRoot addSubview:view];
+            if (index == 1) { gOverlayImageView2 = view; } else { gOverlayImageView = view; }
             doReset = YES;  // view vừa tạo -> luôn căn giữa theo ảnh
         }
         updateExpandedPinchGesture();
         loadHitboxes();          // nạp hitbox đã lưu
         rebuildHitboxViews();    // dựng ô (ẩn ở chế độ thường)
 
-        gOverlayImageView.image = rendersOverlayImage() ? image : nil;
+        view.image = rendersOverlayImage() ? image : nil;
 
         if (doReset) {
-            // Ảnh mới: huỷ mọi toggle dim đang chờ, thoát viền xanh, căn giữa lại
-            // theo kích thước ảnh mới, rồi GHI ĐÈ state cũ. KHÔNG đọc lại state.plist
-            // (nếu không sẽ dính lại frame/scale-lock của ảnh trước).
+            // Ảnh mới: huỷ mọi toggle đang chờ, thoát viền xanh, căn giữa lại, cho ảnh
+            // này HIỆN (active=index) -> ảnh kia tự ẩn. GHI ĐÈ state cũ.
             gToggleGeneration++;
             if (gScaleLockModeEnabled) {
                 applyScaleLockMode(NO);
@@ -1330,36 +1462,42 @@ static void showOverlayImage(UIImage *image, BOOL resetFrame) {
             gScaleLockModeEnabled = NO;
             gOverlayVisible = YES;
             gOverlayDimmed = NO;
-            gOverlayImageView.transform = CGAffineTransformIdentity;
-            gOverlayImageView.frame = centeredFrameForImage(image);
-            gOverlayImageView.hidden = NO;
-            gOverlayImageView.layer.borderWidth = 0;
-            gOverlayImageView.layer.borderColor = nil;
-            applyOverlayAlpha();
+            gActiveImageIndex = index;
+            view.transform = CGAffineTransformIdentity;
+            view.frame = centeredFrameForImage(image);
+            view.layer.borderWidth = 0;
+            view.layer.borderColor = nil;
+            applyActiveImageDisplay();
             updateScaleLockControlsVisibility();
             refreshOverlayWindowVisibility();
             persistOverlayState(YES);
-            overlayLog(@"Overlay ANH MOI (reset frame) %.0fx%.0f", image.size.width, image.size.height);
+            overlayLog(@"Overlay ANH %ld MOI (reset frame) %.0fx%.0f", (long)index, image.size.width, image.size.height);
         } else {
-            if (CGRectIsEmpty(gOverlayImageView.frame) || gOverlayImageView.frame.size.width < 2 || gOverlayImageView.frame.size.height < 2) {
-                gOverlayImageView.frame = centeredFrameForImage(image);
+            if (CGRectIsEmpty(view.frame) || view.frame.size.width < 2 || view.frame.size.height < 2) {
+                view.frame = centeredFrameForImage(image);
             }
-            gOverlayImageView.hidden = NO;
-            applyOverlayAlpha();
             gOverlayVisible = YES;
             applyOverlayStateFromDisk();
+            applyActiveImageDisplay();
             refreshOverlayWindowVisibility();
             persistOverlayState(NO);
         }
 
-        overlayLog(@"Overlay HIEN %.0fx%.0f windowHidden=%d rootHidden=%d",
-                   image.size.width, image.size.height,
+        overlayLog(@"Overlay HIEN anh %ld %.0fx%.0f windowHidden=%d rootHidden=%d",
+                   (long)index, image.size.width, image.size.height,
                    gOverlayWindow.hidden, gOverlayRoot.hidden);
       } @catch (NSException *exception) {
         overlayLog(@"showOverlayImage: EXCEPTION %@ - %@", exception.name, exception.reason);
       }
     });
 }
+
+static void showOverlayImage(UIImage *image, BOOL resetFrame) {
+    showOverlayImageAtIndex(image, resetFrame, 0);
+}
+
+static UIImage *overlayImage2FromPasteboard(void);
+static UIImage *overlayImage2FromSharedFile(void);
 
 static void loadAndShowPublishedOverlay(BOOL resetFrame) {
     UIImage *image = overlayImageFromPasteboard();
@@ -1376,6 +1514,18 @@ static void loadAndShowPublishedOverlay(BOOL resetFrame) {
     showOverlayImage(image, resetFrame);
 }
 
+static void loadAndShowPublishedOverlay2(BOOL resetFrame) {
+    UIImage *image = overlayImage2FromPasteboard();
+    if (!image) {
+        image = overlayImage2FromSharedFile();
+    }
+    if (!image) {
+        return;   // ảnh 2 là tùy chọn -> vắng mặt là bình thường, không log
+    }
+    overlayLog(@"loadAndShowPublishedOverlay2: doc duoc anh 2 %.0fx%.0f reset=%d", image.size.width, image.size.height, resetFrame);
+    showOverlayImageAtIndex(image, resetFrame, 1);
+}
+
 static void removeOverlay(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (gQuickActionsVisible) {
@@ -1389,6 +1539,12 @@ static void removeOverlay(void) {
             [gOverlayImageView removeFromSuperview];
             gOverlayImageView = nil;
         }
+        if (gOverlayImageView2) {
+            [gOverlayImageView2 removeFromSuperview];
+            gOverlayImageView2 = nil;
+        }
+        gActiveImageIndex = 0;
+        gEditingImageIndex = 0;
 
         clearAllHitboxes();           // xoá ảnh -> xoá luôn mọi hitbox
         gHitboxToolbar = nil;
@@ -1415,9 +1571,41 @@ static void removeOverlay(void) {
 
 static void clearPublishedStorage(void) {
     [UIPasteboard removePasteboardWithName:kOverlayPasteboardName];
+    [UIPasteboard removePasteboardWithName:kOverlayPasteboard2Name];
     [NSFileManager.defaultManager removeItemAtPath:kOverlayImagePath error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:kOverlayImage2Path error:nil];
     [NSFileManager.defaultManager removeItemAtPath:kOverlayStatePath error:nil];
     [NSFileManager.defaultManager removeItemAtPath:kOverlayHitboxesPath error:nil];
+}
+
+// Xoá RIÊNG ảnh 2 (giữ nguyên ảnh 1): gỡ view, xoá hitbox của ảnh 2, đưa active về ảnh 1.
+static void removeImage2(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (gOverlayImageView2) {
+            [gOverlayImageView2 removeFromSuperview];
+            gOverlayImageView2 = nil;
+        }
+        // Xoá mọi hitbox thuộc ảnh 2.
+        if (gHitboxes) {
+            for (NSInteger i = (NSInteger)gHitboxes.count - 1; i >= 0; i--) {
+                if ([gHitboxes[i][@"img"] integerValue] == 1) {
+                    [gHitboxes removeObjectAtIndex:i];
+                }
+            }
+            saveHitboxes();
+        }
+        if (gActiveImageIndex == 1) {
+            gActiveImageIndex = 0;
+        }
+        gEditingImageIndex = 0;
+        [UIPasteboard removePasteboardWithName:kOverlayPasteboard2Name];
+        [NSFileManager.defaultManager removeItemAtPath:kOverlayImage2Path error:nil];
+        rebuildHitboxViews();
+        applyActiveImageDisplay();
+        refreshOverlayWindowVisibility();
+        persistOverlayState(YES);
+        NSLog(@"[OverlayIOSTOOL] Image 2 removed");
+    });
 }
 
 static void __attribute__((unused)) stopOverlayTool(void) {
@@ -1458,8 +1646,7 @@ static void applyOverlayVisibility(BOOL visible) {
     if (!visible) {
         gOverlayDimmed = NO;
     }
-    applyOverlayAlpha();
-    gOverlayImageView.hidden = !visible;
+    applyActiveImageDisplay();
     refreshOverlayWindowVisibility();
     persistOverlayState(YES);
 }
@@ -1470,8 +1657,7 @@ static void applyOverlayDimmed(BOOL dimmed) {
     }
 
     gOverlayDimmed = dimmed;
-    gOverlayImageView.hidden = NO;
-    animateOverlayAlphaForCurrentDimState();
+    applyActiveImageDisplay();   // TỨC THÌ, không animation
     refreshOverlayWindowVisibility();
     persistOverlayState(YES);
 }
@@ -1487,6 +1673,7 @@ static void loadHitboxes(void) {
             NSDictionary *d = item;
             NSMutableDictionary *h = [NSMutableDictionary dictionary];
             h[@"type"] = @([d[@"type"] integerValue] == 1 ? 1 : 0);
+            h[@"img"] = @([d[@"img"] integerValue] == 1 ? 1 : 0);   // 0 = ảnh 1 (mặc định), 1 = ảnh 2
             h[@"x"] = @([d[@"x"] doubleValue]);
             h[@"y"] = @([d[@"y"] doubleValue]);
             h[@"w"] = @(MAX(20.0, [d[@"w"] doubleValue]));
@@ -1502,10 +1689,16 @@ static void saveHitboxes(void) {
     [(gHitboxes ?: @[]) writeToFile:kOverlayHitboxesPath atomically:YES];
 }
 
-static NSInteger countHitboxesOfType(NSInteger type) {
+static NSInteger hitboxImageAt(NSInteger index) {
+    if (index < 0 || index >= (NSInteger)gHitboxes.count) return 0;
+    return [gHitboxes[index][@"img"] integerValue] == 1 ? 1 : 0;
+}
+
+// Đếm hitbox theo loại VÀ theo ảnh (giới hạn 8 mỗi loại / mỗi ảnh).
+static NSInteger countHitboxesOfTypeForImage(NSInteger type, NSInteger img) {
     NSInteger n = 0;
     for (NSDictionary *h in gHitboxes) {
-        if ([h[@"type"] integerValue] == type) n++;
+        if ([h[@"type"] integerValue] == type && [h[@"img"] integerValue] == img) n++;
     }
     return n;
 }
@@ -1516,10 +1709,20 @@ static CGRect hitboxRectAt(NSInteger index) {
     return CGRectMake([h[@"x"] doubleValue], [h[@"y"] doubleValue], [h[@"w"] doubleValue], [h[@"h"] doubleValue]);
 }
 
-// Hitbox trên cùng chứa điểm p (toạ độ root). -1 nếu không trúng.
+// Hitbox trên cùng chứa điểm p (toạ độ root). -1 nếu không trúng. Chế độ thường: xét
+// hitbox của CẢ 2 ảnh (hitbox ảnh đang ẩn vẫn phải kích hoạt để hiện ảnh đó).
 static NSInteger hitboxIndexAtPoint(CGPoint p) {
     for (NSInteger i = (NSInteger)gHitboxes.count - 1; i >= 0; i--) {
         if (CGRectContainsPoint(hitboxRectAt(i), p)) return i;
+    }
+    return -1;
+}
+
+// Như trên nhưng CHỈ xét hitbox thuộc ảnh img (dùng khi chọn trong viền xanh để không
+// lẫn sang hitbox của ảnh không-focus).
+static NSInteger hitboxIndexAtPointForImage(CGPoint p, NSInteger img) {
+    for (NSInteger i = (NSInteger)gHitboxes.count - 1; i >= 0; i--) {
+        if (hitboxImageAt(i) == img && CGRectContainsPoint(hitboxRectAt(i), p)) return i;
     }
     return -1;
 }
@@ -1529,6 +1732,12 @@ static UIColor *hitboxColorForType(NSInteger type) {
 }
 
 // ===================== HITBOX: hiển thị (viền xanh) =====================
+// Chỉ hitbox của ảnh ĐANG FOCUS hiện trong viền xanh (tránh chèn lẫn nhau).
+static BOOL hitboxViewShouldShow(NSInteger index) {
+    if (!gScaleLockModeEnabled) return NO;
+    return hitboxImageAt(index) == gEditingImageIndex;
+}
+
 static void updateHitboxSelectionHighlight(void) {
     for (NSUInteger i = 0; i < gHitboxViews.count && i < gHitboxes.count; i++) {
         UIView *v = gHitboxViews[i];
@@ -1537,10 +1746,19 @@ static void updateHitboxSelectionHighlight(void) {
         v.layer.borderWidth = sel ? 4.0 : 2.0;
         v.backgroundColor = [hitboxColorForType(type) colorWithAlphaComponent:(sel ? 0.32 : 0.15)];
     }
-    if (gOverlayImageView) {
-        BOOL imgSel = (gSelectedIndex < 0);
-        gOverlayImageView.layer.borderWidth = gScaleLockModeEnabled ? (imgSel ? 4.0 : 2.0) : 0.0;
-        gOverlayImageView.layer.borderColor = gScaleLockModeEnabled ? UIColor.systemBlueColor.CGColor : nil;
+    // Viền xanh: cả 2 ảnh đều viền xanh; ảnh đang FOCUS đậm hơn, ảnh được CHỌN dày nhất.
+    for (NSInteger i = 0; i < 2; i++) {
+        UIImageView *img = imageViewAtIndex(i);
+        if (!img) continue;
+        if (!gScaleLockModeEnabled) {
+            img.layer.borderWidth = 0.0;
+            img.layer.borderColor = nil;
+            continue;
+        }
+        BOOL focused = (i == gEditingImageIndex);
+        BOOL selected = focused && (gSelectedIndex < 0);
+        img.layer.borderWidth = selected ? 4.0 : (focused ? 3.0 : 1.5);
+        img.layer.borderColor = UIColor.systemBlueColor.CGColor;
     }
 }
 
@@ -1556,15 +1774,24 @@ static void rebuildHitboxViews(void) {
         v.userInteractionEnabled = NO;   // chỉ là hình; chọn bằng toạ độ trong sendEvent
         v.layer.borderColor = hitboxColorForType(type).CGColor;
         v.layer.cornerRadius = 6.0;
-        v.hidden = !gScaleLockModeEnabled;
+        v.hidden = !hitboxViewShouldShow((NSInteger)i);
         [gOverlayRoot addSubview:v];
         [gHitboxViews addObject:v];
     }
     if (gOverlayImageView) [gOverlayRoot bringSubviewToFront:gOverlayImageView];
+    if (gOverlayImageView2) [gOverlayRoot bringSubviewToFront:gOverlayImageView2];
     if (gHitboxToolbar) [gOverlayRoot bringSubviewToFront:gHitboxToolbar];
+    if (gImageFocusBar) [gOverlayRoot bringSubviewToFront:gImageFocusBar];
     if (gSizeXSlider) [gOverlayRoot bringSubviewToFront:gSizeXSlider];
     if (gSizeYSlider) [gOverlayRoot bringSubviewToFront:gSizeYSlider];
     updateHitboxSelectionHighlight();
+}
+
+// Cập nhật ẩn/hiện ô hitbox theo ảnh đang focus (dùng khi đổi focus / vào viền xanh).
+static void refreshHitboxViewVisibility(void) {
+    for (NSUInteger i = 0; i < gHitboxViews.count && i < gHitboxes.count; i++) {
+        gHitboxViews[i].hidden = !hitboxViewShouldShow((NSInteger)i);
+    }
 }
 
 static void setHitboxViewsHidden(BOOL hidden) {
@@ -1574,14 +1801,16 @@ static void setHitboxViewsHidden(BOOL hidden) {
 // ===================== HITBOX: phần tử đang chọn (ảnh/hitbox) =====================
 static CGRect selectedElementFrame(void) {
     if (gSelectedIndex < 0) {
-        return gOverlayImageView ? gOverlayImageView.frame : CGRectZero;
+        UIImageView *v = editingImageView();
+        return v ? v.frame : CGRectZero;
     }
     return hitboxRectAt(gSelectedIndex);
 }
 
 static void setSelectedElementFrame(CGRect f) {
     if (gSelectedIndex < 0) {
-        if (gOverlayImageView) gOverlayImageView.frame = f;
+        UIImageView *v = editingImageView();
+        if (v) v.frame = f;
         return;
     }
     if (gSelectedIndex >= (NSInteger)gHitboxes.count) return;
@@ -1598,6 +1827,8 @@ static void hitboxResizeWidth(CGFloat newW);
 static void hitboxResizeHeight(CGFloat newH);
 static void overlayAddHitbox(NSInteger type);
 static void overlayRemoveSelectedHitbox(void);
+static void setEditingImageIndex(NSInteger index);
+static void updateImageFocusButtons(void);
 
 @interface OverlayHitboxTarget : NSObject
 @end
@@ -1608,6 +1839,8 @@ static void overlayRemoveSelectedHitbox(void);
 - (void)addDim { overlayAddHitbox(1); }
 - (void)removeSel { overlayRemoveSelectedHitbox(); }
 - (void)doneEdit { applyScaleLockMode(NO); }
+- (void)focusImage1 { setEditingImageIndex(0); }
+- (void)focusImage2 { setEditingImageIndex(1); }
 @end
 static OverlayHitboxTarget *gHitboxTarget = nil;
 
@@ -1656,12 +1889,14 @@ static void hitboxResizeHeight(CGFloat newH) {
 
 static void overlayAddHitbox(NSInteger type) {
     if (!gOverlayRoot) return;
-    if (countHitboxesOfType(type) >= kOverlayMaxHitboxesPerType) return;
+    // Giới hạn 8 mỗi loại / mỗi ảnh; hitbox mới thuộc ảnh đang focus.
+    if (countHitboxesOfTypeForImage(type, gEditingImageIndex) >= kOverlayMaxHitboxesPerType) return;
     if (!gHitboxes) gHitboxes = [NSMutableArray array];
     CGRect b = gOverlayRoot.bounds;
     CGFloat w = 130, h = 70;
     NSMutableDictionary *hb = [NSMutableDictionary dictionary];
     hb[@"type"] = @(type);
+    hb[@"img"] = @(gEditingImageIndex);
     hb[@"x"] = @((b.size.width - w)/2.0);
     hb[@"y"] = @((b.size.height - h)/2.0);
     hb[@"w"] = @(w);
@@ -1725,6 +1960,27 @@ static void ensureHitboxEditUI(void) {
     UIView *stack = [gHitboxToolbar viewWithTag:7788];
     stack.frame = gHitboxToolbar.bounds;
 
+    // Thanh chọn FOCUS "Ảnh 1 / Ảnh 2" (chỉ ý nghĩa khi có ảnh 2). Bấm để đổi ảnh đang
+    // chỉnh: hitbox + điều khiển theo ảnh đó; cả 2 ảnh vẫn hiện.
+    if (!gImageFocusBar) {
+        gImageFocusBar = [[UIView alloc] init];
+        gImageFocusBar.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.92];
+        gImageFocusBar.layer.cornerRadius = 10.0;
+        [root addSubview:gImageFocusBar];
+        gFocusImage1Button = hitboxToolButton(@"Ảnh 1", UIColor.whiteColor, @selector(focusImage1));
+        gFocusImage2Button = hitboxToolButton(@"Ảnh 2", UIColor.whiteColor, @selector(focusImage2));
+        UIStackView *fstack = [[UIStackView alloc] initWithArrangedSubviews:@[gFocusImage1Button, gFocusImage2Button]];
+        fstack.axis = UILayoutConstraintAxisHorizontal;
+        fstack.distribution = UIStackViewDistributionFillEqually;
+        fstack.tag = 7799;
+        [gImageFocusBar addSubview:fstack];
+    }
+    gImageFocusBar.frame = CGRectMake(10, safeTop + 48, b.size.width - 20, 40);
+    UIView *fstack = [gImageFocusBar viewWithTag:7799];
+    fstack.frame = gImageFocusBar.bounds;
+    gImageFocusBar.hidden = !hasSecondImage();
+    updateImageFocusButtons();
+
     if (!gSizeXSlider) {
         gSizeXSlider = [UISlider new];
         gSizeXSlider.minimumValue = 20.0;
@@ -1755,12 +2011,35 @@ static void setHitboxEditUIHidden(BOOL hidden) {
     gHitboxToolbar.hidden = hidden;
     gSizeXSlider.hidden = hidden;
     gSizeYSlider.hidden = hidden;
+    gImageFocusBar.hidden = hidden || !hasSecondImage();
+}
+
+// Tô đậm nút focus của ảnh đang chỉnh.
+static void updateImageFocusButtons(void) {
+    UIColor *on = [UIColor colorWithRed:0.12 green:0.47 blue:1.0 alpha:0.95];
+    UIColor *off = [UIColor colorWithWhite:0.18 alpha:0.95];
+    gFocusImage1Button.backgroundColor = (gEditingImageIndex == 0) ? on : off;
+    gFocusImage2Button.backgroundColor = (gEditingImageIndex == 1) ? on : off;
+}
+
+// Đổi ảnh đang FOCUS trong viền xanh: hitbox + điều khiển chuyển sang ảnh đó; chọn lại
+// chính ảnh đó (gSelectedIndex=-1). Cả 2 ảnh vẫn hiện.
+static void setEditingImageIndex(NSInteger index) {
+    if (!gScaleLockModeEnabled) return;
+    if (index == 1 && !hasSecondImage()) index = 0;
+    if (index < 0 || index > 1) index = 0;
+    gEditingImageIndex = index;
+    gSelectedIndex = -1;
+    refreshHitboxViewVisibility();
+    updateImageFocusButtons();
+    updateHitboxSelectionHighlight();
+    updateHitboxEditUIForSelection();
 }
 
 // Điểm có nằm trên UI chỉnh sửa (slider/toolbar) không -> để không nhầm thành kéo phần tử.
 static BOOL pointOnHitboxEditUI(CGPoint pInRoot) {
-    UIView *controls[3] = { gHitboxToolbar, gSizeXSlider, gSizeYSlider };
-    for (int i = 0; i < 3; i++) {
+    UIView *controls[4] = { gHitboxToolbar, gImageFocusBar, gSizeXSlider, gSizeYSlider };
+    for (int i = 0; i < 4; i++) {
         UIView *c = controls[i];
         if (c && !c.hidden) {
             CGPoint lp = [c convertPoint:pInRoot fromView:gOverlayRoot];
@@ -1784,6 +2063,7 @@ static void applyScaleLockMode(BOOL enabled) {
     gToggleGeneration++;
 
     gImagePanGesture.enabled = !enabled;
+    gImagePanGesture2.enabled = !enabled;
 
     // Reset trạng thái cử chỉ tự tính khi đổi chế độ.
     gManualPinchActive = NO;
@@ -1802,20 +2082,30 @@ static void applyScaleLockMode(BOOL enabled) {
         if (gOverlayHostWindow) {
             [gOverlayHostWindow bringSubviewToFront:gOverlayRoot];
         }
-        gOverlayImageView.hidden = NO;
-        applyOverlayAlpha();
-        gSelectedIndex = -1;               // vào viền xanh: mặc định chọn ẢNH
+        // Vào viền xanh: CẢ 2 ẢNH hiện rõ; mặc định focus ảnh đang hiện (hoặc ảnh 1).
+        gEditingImageIndex = (gActiveImageIndex == 1 && hasSecondImage()) ? 1 : 0;
+        applyActiveImageDisplay();         // gScaleLockModeEnabled -> hiện cả 2 ảnh
+        gSelectedIndex = -1;               // mặc định chọn ẢNH đang focus
         ensureHitboxEditUI();
-        rebuildHitboxViews();              // hiện các hitbox
-        setHitboxViewsHidden(NO);
+        rebuildHitboxViews();              // hiện hitbox của ảnh focus
         setHitboxEditUIHidden(NO);
         updateHitboxEditUIForSelection();
         updateHitboxSelectionHighlight();
     } else {
-        gOverlayImageView.layer.borderWidth = 0;
-        gOverlayImageView.layer.borderColor = nil;
+        // THOÁT viền xanh: ảnh đang FOCUS trở thành ảnh HIỆN (rõ), ảnh kia ẩn hẳn.
+        gActiveImageIndex = (gEditingImageIndex == 1 && hasSecondImage()) ? 1 : 0;
+        gOverlayDimmed = NO;
+        if (gOverlayImageView) {
+            gOverlayImageView.layer.borderWidth = 0;
+            gOverlayImageView.layer.borderColor = nil;
+        }
+        if (gOverlayImageView2) {
+            gOverlayImageView2.layer.borderWidth = 0;
+            gOverlayImageView2.layer.borderColor = nil;
+        }
         setHitboxViewsHidden(YES);         // thoát: hitbox tàng hình
         setHitboxEditUIHidden(YES);
+        applyActiveImageDisplay();         // thoát: chỉ ảnh đang focus còn hiện
     }
 
     refreshOverlayWindowVisibility();
@@ -1839,12 +2129,13 @@ static void __attribute__((unused)) scheduleToggleOverlayVisibility(void) {
     });
 }
 
-// Đặt mờ/rõ theo HƯỚNG (không toggle) với delay tương ứng. Dùng cho hitbox.
-static void scheduleSetOverlayDimmed(BOOL dimmed) {
+// Đặt mờ/rõ theo HƯỚNG (không toggle) với delay tương ứng. (Đường cũ 1 ảnh - giữ lại.)
+static void __attribute__((unused)) scheduleSetOverlayDimmed(BOOL dimmed) {
     if (!gOverlayImageView || gOverlayDimmed == dimmed) {
         return;
     }
     NSInteger delayMs = dimmed ? gHideDelayMs : gShowDelayMs;
+    overlayLog(@"scheduleSetOverlayDimmed dimmed=%d delay=%ldms opacity=%.2f", dimmed, (long)delayMs, gDimOpacity);
     NSUInteger generation = ++gToggleGeneration;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayMs * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
         if (generation != gToggleGeneration) {
@@ -1854,42 +2145,91 @@ static void scheduleSetOverlayDimmed(BOOL dimmed) {
     });
 }
 
+// ĐA-ẢNH: áp dụng (sau delay) việc HIỆN/MỜ 1 ảnh. Ảnh này thành ảnh đang hiện
+// (gActiveImageIndex) -> ảnh kia tự ẩn hẳn (loại trừ lẫn nhau). dimmed=YES: ảnh này mờ
+// về độ mờ dùng chung. TỨC THÌ, không animation.
+static void applyActiveImage(NSInteger index, BOOL dimmed) {
+    if (gScaleLockModeEnabled || index < 0 || index > 1 || !imageViewAtIndex(index)) {
+        return;
+    }
+    gActiveImageIndex = index;
+    gOverlayDimmed = dimmed;
+    applyActiveImageDisplay();
+    refreshOverlayWindowVisibility();
+    persistOverlayState(YES);
+}
+
+// Lên lịch HIỆN ảnh index sau delay (Hiện -> delay hiện, Mờ -> delay ẩn). Kích hoạt khi
+// THẢ TAY (gọi từ overlayTriggerAtPoint). Bỏ qua nếu trạng thái không đổi.
+static void scheduleShowImage(NSInteger index, BOOL dimmed) {
+    if (index < 0 || index > 1 || !imageViewAtIndex(index)) {
+        return;
+    }
+    if (gActiveImageIndex == index && gOverlayDimmed == dimmed && !imageViewAtIndex(index).hidden) {
+        return;   // đang đúng trạng thái rồi -> khỏi làm
+    }
+    NSInteger delayMs = dimmed ? gHideDelayMs : gShowDelayMs;
+    overlayLog(@"scheduleShowImage idx=%ld dimmed=%d delay=%ldms", (long)index, dimmed, (long)delayMs);
+    NSUInteger generation = ++gToggleGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayMs * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+        if (generation != gToggleGeneration) {
+            return;
+        }
+        applyActiveImage(index, dimmed);
+    });
+}
+
+static BOOL pointInsideImageView(UIImageView *v, CGPoint pointInRoot) {
+    if (!v || v.hidden || !gOverlayRoot) {
+        return NO;
+    }
+    CGPoint point = [v convertPoint:pointInRoot fromView:gOverlayRoot];
+    return [v pointInside:point withEvent:nil];
+}
+
+// Chạm có trên ẢNH ĐANG HIỆN không (chế độ thường).
 static BOOL pointInsideOverlayImage(CGPoint pointInRoot) {
-    if (!gOverlayImageView || gOverlayImageView.hidden || !gOverlayVisible) {
+    if (!gOverlayVisible) {
         return NO;
     }
-
-    CGPoint point = [gOverlayImageView convertPoint:pointInRoot fromView:gOverlayRoot];
-    return [gOverlayImageView pointInside:point withEvent:nil];
+    return pointInsideImageView(activeImageView(), pointInRoot);
 }
 
+// Chạm có trên ảnh không: viền xanh xét CẢ 2 ảnh; thường xét ảnh đang hiện.
 static BOOL touchInsideOverlayImage(UITouch *touch) {
-    if (!touch || !gOverlayRoot || !gOverlayImageView) {
+    if (!touch || !gOverlayRoot) {
         return NO;
     }
-
-    CGPoint overlayPoint = [touch locationInView:gOverlayRoot];
-    return pointInsideOverlayImage(overlayPoint);
+    CGPoint p = [touch locationInView:gOverlayRoot];
+    if (gScaleLockModeEnabled) {
+        return pointInsideImageView(gOverlayImageView, p) || pointInsideImageView(gOverlayImageView2, p);
+    }
+    return pointInsideOverlayImage(p);
 }
 
-// CHẾ ĐỘ THƯỜNG - quyết định 1 cú chạm (toạ độ root):
-//  trúng hitbox Hiện -> làm RÕ (nếu đang mờ); trúng hitbox Mờ -> làm MỜ (nếu đang rõ);
-//  trúng ẢNH -> panel nạp/rút; còn lại -> KHÔNG gì (thao tác app tự do).
-// Mờ/rõ chỉ chạy khi bật toggle-click (công tắc tổng); panel luôn chạy.
+// CHẾ ĐỘ THƯỜNG - quyết định 1 cú chạm (toạ độ root), kích hoạt khi THẢ TAY:
+//  trúng hitbox Hiện của ảnh N -> HIỆN ảnh N (ảnh kia mất); trúng hitbox Mờ của ảnh N ->
+//  ảnh N MỜ về độ mờ; trúng ẢNH đang hiện -> panel nạp/rút; còn lại -> không gì.
 static void overlayTriggerAtPoint(CGPoint p) {
     if (gScaleLockModeEnabled || !gOverlayImageView) {
         return;
     }
     NSInteger idx = hitboxIndexAtPoint(p);
     if (idx >= 0) {
-        // KHÔNG phụ thuộc toggle-click nữa: trúng hitbox luôn mờ/rõ theo độ mờ đã set.
         NSInteger type = [gHitboxes[idx][@"type"] integerValue];
-        scheduleSetOverlayDimmed(type == 1);   // 0=Hiện -> rõ(NO), 1=Mờ -> mờ(YES)
+        NSInteger img = hitboxImageAt(idx);
+        if (img == 1 && !hasSecondImage()) {
+            return;   // hitbox thuộc ảnh 2 nhưng chưa có ảnh 2
+        }
+        scheduleShowImage(img, type == 1);   // 0=Hiện -> rõ(NO), 1=Mờ -> mờ(YES)
         return;
     }
-    CGRect zone = CGRectInset(gOverlayImageView.frame, -28.0, -28.0);
-    if (pointInsideOverlayImage(p) || CGRectContainsPoint(zone, p)) {
-        showOverlayQuickActions();
+    UIImageView *active = activeImageView();
+    if (active) {
+        CGRect zone = CGRectInset(active.frame, -28.0, -28.0);
+        if (pointInsideOverlayImage(p) || CGRectContainsPoint(zone, p)) {
+            showOverlayQuickActions();
+        }
     }
 }
 
@@ -2063,7 +2403,7 @@ static void overlayHandleManualLongPress(UIEvent *event) {
     // Vào/THOÁT viền xanh đều bằng giữ-lâu TRÊN ẢNH (không phải hitbox/nền/đối tượng đang
     // chọn). Khi đang ở viền xanh còn phải KHÔNG trùng hitbox để không lẫn với chọn hitbox.
     BOOL onImage = touchInsideOverlayImage(single);
-    if (!onImage || (gScaleLockModeEnabled && hitboxIndexAtPoint(p) >= 0)) {
+    if (!onImage || (gScaleLockModeEnabled && hitboxIndexAtPointForImage(p, gEditingImageIndex) >= 0)) {
         gLongPressTracking = NO;
         gLongPressGeneration++;
         return;
@@ -2113,12 +2453,20 @@ static void overlayHandleScaleLockSelect(UIEvent *event) {
         return;
     }
     CGPoint p = [began locationInView:gOverlayRoot];
-    NSInteger idx = hitboxIndexAtPoint(p);
+    // Ưu tiên hitbox của ảnh ĐANG FOCUS (chỉ hitbox đó mới hiện). Nếu trúng ẢNH 2 (đang
+    // focus ảnh 1) hoặc ngược lại -> CHUYỂN FOCUS sang ảnh được chạm + chọn chính ảnh đó.
+    NSInteger idx = hitboxIndexAtPointForImage(p, gEditingImageIndex);
     if (idx >= 0) {
         gSelectedIndex = idx;
-    } else if (pointInsideOverlayImage(p)) {
-        gSelectedIndex = -1;
+    } else if (pointInsideImageView(editingImageView(), p)) {
+        gSelectedIndex = -1;                       // chạm ảnh đang focus -> chọn ảnh đó
     } else {
+        // Chạm ảnh KHÁC -> đổi focus sang nó.
+        NSInteger other = gEditingImageIndex == 0 ? 1 : 0;
+        if (pointInsideImageView(imageViewAtIndex(other), p)) {
+            setEditingImageIndex(other);
+            return;
+        }
         return;   // nền trống -> giữ nguyên
     }
     updateHitboxSelectionHighlight();
@@ -2157,11 +2505,13 @@ static void overlayHandleManualTap(UIEvent *event) {
             CGPoint p = [activeTouch locationInView:gOverlayRoot];
             gTapCandidate = YES;
             gTapStart = p;
-            // Trên ảnh = trong frame + dung sai 28pt (ảnh có thể nhỏ -> bấm dễ trượt).
-            CGRect zone = CGRectInset(gOverlayImageView.frame, -28.0, -28.0);
+            // Trên ảnh = trong frame ẢNH ĐANG HIỆN + dung sai 28pt (ảnh nhỏ dễ bấm trượt).
+            UIImageView *active = activeImageView();
+            CGRect activeFrame = active ? active.frame : CGRectZero;
+            CGRect zone = CGRectInset(activeFrame, -28.0, -28.0);
             gTapOnImage = pointInsideOverlayImage(p) || CGRectContainsPoint(zone, p);
             overlayLog(@"SB tap Began (%.0f,%.0f) onImage=%d frame=%@ toggle=%d",
-                       p.x, p.y, gTapOnImage, NSStringFromCGRect(gOverlayImageView.frame), gToggleClickEnabled);
+                       p.x, p.y, gTapOnImage, NSStringFromCGRect(activeFrame), gToggleClickEnabled);
         } else if (gTapCandidate) {
             CGPoint p = [activeTouch locationInView:gOverlayRoot];
             CGFloat dx = p.x - gTapStart.x;
@@ -2214,6 +2564,16 @@ static void registerOverlayNotification(void) {
         NSLog(@"[OverlayIOSTOOL] Remove notification received");
         clearPublishedStorage();
         removeOverlay();
+    });
+
+    notify_register_dispatch(kOverlayUpdated2Notification, &gNotify2Token, dispatch_get_main_queue(), ^(__unused int token) {
+        overlayLog(@"Nhan notification 'image2-updated' -> tai & hien anh 2 (reset frame)");
+        loadAndShowPublishedOverlay2(YES);
+    });
+
+    notify_register_dispatch(kOverlayRemove2Notification, &gRemove2Token, dispatch_get_main_queue(), ^(__unused int token) {
+        NSLog(@"[OverlayIOSTOOL] Remove image 2 notification received");
+        removeImage2();
     });
 
     notify_register_dispatch(kOverlaySettingsNotification, &gSettingsToken, dispatch_get_main_queue(), ^(__unused int token) {
@@ -2279,6 +2639,9 @@ static void activateOverlayHost(void) {
     // PER-APP: khi app foreground, tự đọc ảnh từ pasteboard và hiện trong app này.
     if (gOverlayImageView) {
         refreshOverlayWindowVisibility();
+        if (!gOverlayImageView2) {
+            loadAndShowPublishedOverlay2(NO);   // khôi phục ảnh 2 nếu có
+        }
         reportAppStatus(@"img-ok");
         return;
     }
@@ -2289,6 +2652,9 @@ static void activateOverlayHost(void) {
     }
     if (image) {
         showOverlayImage(image, NO);
+        if (!gOverlayImageView2) {
+            loadAndShowPublishedOverlay2(NO);   // khôi phục ảnh 2 nếu có
+        }
         reportAppStatus(@"img-ok");
     } else {
         reportAppStatus(@"no-img");
@@ -2417,7 +2783,7 @@ static void scheduleActivationRetry(int attempt) {
             return NO;
         }
     }
-    if (gestureRecognizer == gImagePanGesture || gestureRecognizer == gImagePinchGesture) {
+    if (gestureRecognizer == gImagePanGesture || gestureRecognizer == gImagePanGesture2 || gestureRecognizer == gImagePinchGesture) {
         return !gScaleLockModeEnabled;
     }
     if (gestureRecognizer == gQuickActionsTapGesture) {
@@ -2448,11 +2814,11 @@ static void scheduleActivationRetry(int attempt) {
 - (void)sendEvent:(UIEvent *)event {
     if (!gOverlayProcessEnabled) {
         %orig(event);
-        // App relay: gửi TOẠ ĐỘ cú chạm sang SpringBoard. SpringBoard biết vị trí ảnh
-        // nên tự quyết: trúng ảnh -> hiện panel nạp/rút (KHÔNG dim); ngoài ảnh -> dim.
+        // App relay: gửi TOẠ ĐỘ cú chạm sang SpringBoard khi NHẢ TAY (Ended) -> kích hoạt
+        // lúc thả tay, không phải lúc chạm. SpringBoard biết vị trí ảnh/hitbox nên tự quyết.
         if (gAppTouchRelayEnabled && event.type == UIEventTypeTouches) {
             for (UITouch *touch in event.allTouches) {
-                if (touch.phase == UITouchPhaseBegan) {
+                if (touch.phase == UITouchPhaseEnded) {
                     if (overlayToggleActiveForApp()) {
                         CGPoint p = [touch locationInView:nil];   // toạ độ cửa sổ = màn hình (app full-screen)
                         uint32_t xi = (uint32_t)MAX(0.0, p.x);

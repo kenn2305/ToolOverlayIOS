@@ -5,13 +5,17 @@
 
 static NSString * const kOverlayDirectory = @"/var/mobile/Library/OverlayIOSTOOL";
 static NSString * const kOverlayImagePath = @"/var/mobile/Library/OverlayIOSTOOL/overlay.png";
+static NSString * const kOverlayImage2Path = @"/var/mobile/Library/OverlayIOSTOOL/overlay2.png";
 static NSString * const kOverlaySettingsPath = @"/var/mobile/Library/OverlayIOSTOOL/settings.plist";
 static NSString * const kOverlayStatePath = @"/var/mobile/Library/OverlayIOSTOOL/state.plist";
 static NSString * const kOverlayHitboxesPath = @"/var/mobile/Library/OverlayIOSTOOL/hitboxes.plist";
 static NSString * const kOverlayPasteboardName = @"com.vietanh.overlayiostool.image";
+static NSString * const kOverlayPasteboard2Name = @"com.vietanh.overlayiostool.image2";
 static NSString * const kOverlayLogPath = @"/var/mobile/Library/OverlayIOSTOOL/tweak.log";
 static const char *kOverlayUpdatedNotification = "com.vietanh.overlayiostool.image-updated";
 static const char *kOverlayRemoveNotification = "com.vietanh.overlayiostool.image-remove";
+static const char *kOverlayUpdated2Notification = "com.vietanh.overlayiostool.image2-updated";
+static const char *kOverlayRemove2Notification = "com.vietanh.overlayiostool.image2-remove";
 static const char *kOverlaySettingsNotification = "com.vietanh.overlayiostool.settings-updated";
 
 // App ghi log vào CÙNG file với tweak (app có entitlements đọc/ghi /var/mobile/Library)
@@ -119,14 +123,20 @@ static void appLog(NSString *format, ...) {
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIButton *showButton;
 @property (nonatomic, strong) UIButton *deleteButton;
+// ẢNH 2 (tuỳ chọn)
+@property (nonatomic, strong) UIImage *selectedImage2;
+@property (nonatomic, strong) NSData *selectedImageData2;
+@property (nonatomic, strong) UIImageView *previewImageView2;
+@property (nonatomic, strong) UILabel *status2Label;
+@property (nonatomic, strong) UIButton *showButton2;
+@property (nonatomic, strong) UIButton *deleteButton2;
+@property (nonatomic, assign) NSInteger pickingSlot;   // 1 = ảnh 1, 2 = ảnh 2 (cho PHPicker)
 @property (nonatomic, strong) UISlider *hideDelaySlider;
 @property (nonatomic, strong) UISlider *showDelaySlider;
 @property (nonatomic, strong) UISlider *dimOpacitySlider;
-@property (nonatomic, strong) UISlider *dimAnimationSlider;
 @property (nonatomic, strong) UILabel *hideDelayValueLabel;
 @property (nonatomic, strong) UILabel *showDelayValueLabel;
 @property (nonatomic, strong) UILabel *dimOpacityValueLabel;
-@property (nonatomic, strong) UILabel *dimAnimationValueLabel;
 @property (nonatomic, assign) int settingsNotifyToken;
 @end
 
@@ -241,6 +251,82 @@ static void appLog(NSString *format, ...) {
         button.layer.cornerRadius = 8;
     }
 
+    // ===== ẢNH 2 (tuỳ chọn): dùng CHUNG Delay + Độ mờ với ảnh 1 =====
+    UILabel *image2Header = [UILabel new];
+    image2Header.translatesAutoresizingMaskIntoConstraints = NO;
+    image2Header.text = @"Anh 2 (tuy chon)";
+    image2Header.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    [contentView addSubview:image2Header];
+
+    self.previewImageView2 = [UIImageView new];
+    self.previewImageView2.translatesAutoresizingMaskIntoConstraints = NO;
+    self.previewImageView2.backgroundColor = UIColor.secondarySystemBackgroundColor;
+    self.previewImageView2.contentMode = UIViewContentModeScaleAspectFit;
+    self.previewImageView2.clipsToBounds = YES;
+    self.previewImageView2.layer.cornerRadius = 8;
+    [contentView addSubview:self.previewImageView2];
+
+    UIButton *chooseButton2 = [UIButton buttonWithType:UIButtonTypeSystem];
+    chooseButton2.translatesAutoresizingMaskIntoConstraints = NO;
+    chooseButton2.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    [chooseButton2 setTitle:@"Chon anh 2" forState:UIControlStateNormal];
+    [chooseButton2 addTarget:self action:@selector(chooseImage2Tapped) forControlEvents:UIControlEventTouchUpInside];
+    [contentView addSubview:chooseButton2];
+
+    self.showButton2 = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.showButton2.translatesAutoresizingMaskIntoConstraints = NO;
+    self.showButton2.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    [self.showButton2 setTitle:@"Hien anh 2" forState:UIControlStateNormal];
+    [self.showButton2 addTarget:self action:@selector(showImage2Tapped) forControlEvents:UIControlEventTouchUpInside];
+    [contentView addSubview:self.showButton2];
+
+    self.deleteButton2 = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.deleteButton2.translatesAutoresizingMaskIntoConstraints = NO;
+    self.deleteButton2.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    [self.deleteButton2 setTitle:@"Xoa anh 2" forState:UIControlStateNormal];
+    [self.deleteButton2 addTarget:self action:@selector(deleteImage2Tapped) forControlEvents:UIControlEventTouchUpInside];
+    [contentView addSubview:self.deleteButton2];
+
+    self.status2Label = [UILabel new];
+    self.status2Label.translatesAutoresizingMaskIntoConstraints = NO;
+    self.status2Label.textAlignment = NSTextAlignmentCenter;
+    self.status2Label.textColor = UIColor.secondaryLabelColor;
+    self.status2Label.font = [UIFont systemFontOfSize:14];
+    self.status2Label.numberOfLines = 2;
+    [contentView addSubview:self.status2Label];
+
+    UIStackView *buttonStack2 = [[UIStackView alloc] initWithArrangedSubviews:@[chooseButton2, self.showButton2, self.deleteButton2]];
+    buttonStack2.translatesAutoresizingMaskIntoConstraints = NO;
+    buttonStack2.axis = UILayoutConstraintAxisHorizontal;
+    buttonStack2.distribution = UIStackViewDistributionFillEqually;
+    buttonStack2.spacing = 12;
+    [contentView addSubview:buttonStack2];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [image2Header.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:24],
+        [image2Header.leadingAnchor constraintEqualToAnchor:self.previewImageView.leadingAnchor],
+        [image2Header.trailingAnchor constraintEqualToAnchor:self.previewImageView.trailingAnchor],
+
+        [self.previewImageView2.topAnchor constraintEqualToAnchor:image2Header.bottomAnchor constant:10],
+        [self.previewImageView2.leadingAnchor constraintEqualToAnchor:self.previewImageView.leadingAnchor],
+        [self.previewImageView2.trailingAnchor constraintEqualToAnchor:self.previewImageView.trailingAnchor],
+        [self.previewImageView2.heightAnchor constraintEqualToAnchor:self.previewImageView2.widthAnchor multiplier:0.7],
+
+        [buttonStack2.topAnchor constraintEqualToAnchor:self.previewImageView2.bottomAnchor constant:14],
+        [buttonStack2.leadingAnchor constraintEqualToAnchor:self.previewImageView.leadingAnchor],
+        [buttonStack2.trailingAnchor constraintEqualToAnchor:self.previewImageView.trailingAnchor],
+        [buttonStack2.heightAnchor constraintEqualToConstant:48],
+
+        [self.status2Label.topAnchor constraintEqualToAnchor:buttonStack2.bottomAnchor constant:12],
+        [self.status2Label.leadingAnchor constraintEqualToAnchor:self.previewImageView.leadingAnchor],
+        [self.status2Label.trailingAnchor constraintEqualToAnchor:self.previewImageView.trailingAnchor],
+    ]];
+
+    for (UIButton *button in @[chooseButton2, self.showButton2, self.deleteButton2]) {
+        button.backgroundColor = UIColor.secondarySystemBackgroundColor;
+        button.layer.cornerRadius = 8;
+    }
+
     UIView *settingsView = [UIView new];
     settingsView.translatesAutoresizingMaskIntoConstraints = NO;
     settingsView.backgroundColor = UIColor.secondarySystemBackgroundColor;
@@ -304,27 +390,8 @@ static void appLog(NSString *format, ...) {
     [self.dimOpacitySlider addTarget:self action:@selector(settingsChanged) forControlEvents:UIControlEventValueChanged];
     [settingsView addSubview:self.dimOpacitySlider];
 
-    UILabel *dimAnimationLabel = [UILabel new];
-    dimAnimationLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    dimAnimationLabel.text = @"Animation mo";
-    dimAnimationLabel.font = [UIFont systemFontOfSize:14];
-    [settingsView addSubview:dimAnimationLabel];
-
-    self.dimAnimationValueLabel = [UILabel new];
-    self.dimAnimationValueLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.dimAnimationValueLabel.textAlignment = NSTextAlignmentRight;
-    self.dimAnimationValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightRegular];
-    [settingsView addSubview:self.dimAnimationValueLabel];
-
-    self.dimAnimationSlider = [UISlider new];
-    self.dimAnimationSlider.translatesAutoresizingMaskIntoConstraints = NO;
-    self.dimAnimationSlider.minimumValue = 0;
-    self.dimAnimationSlider.maximumValue = 2000;
-    [self.dimAnimationSlider addTarget:self action:@selector(settingsChanged) forControlEvents:UIControlEventValueChanged];
-    [settingsView addSubview:self.dimAnimationSlider];
-
     [NSLayoutConstraint activateConstraints:@[
-        [settingsView.topAnchor constraintEqualToAnchor:self.statusLabel.bottomAnchor constant:18],
+        [settingsView.topAnchor constraintEqualToAnchor:self.status2Label.bottomAnchor constant:18],
         [settingsView.leadingAnchor constraintEqualToAnchor:self.previewImageView.leadingAnchor],
         [settingsView.trailingAnchor constraintEqualToAnchor:self.previewImageView.trailingAnchor],
 
@@ -354,16 +421,7 @@ static void appLog(NSString *format, ...) {
         [self.dimOpacitySlider.topAnchor constraintEqualToAnchor:dimOpacityLabel.bottomAnchor constant:6],
         [self.dimOpacitySlider.leadingAnchor constraintEqualToAnchor:settingsView.leadingAnchor constant:14],
         [self.dimOpacitySlider.trailingAnchor constraintEqualToAnchor:settingsView.trailingAnchor constant:-14],
-
-        [dimAnimationLabel.topAnchor constraintEqualToAnchor:self.dimOpacitySlider.bottomAnchor constant:14],
-        [dimAnimationLabel.leadingAnchor constraintEqualToAnchor:settingsView.leadingAnchor constant:14],
-        [self.dimAnimationValueLabel.centerYAnchor constraintEqualToAnchor:dimAnimationLabel.centerYAnchor],
-        [self.dimAnimationValueLabel.trailingAnchor constraintEqualToAnchor:settingsView.trailingAnchor constant:-14],
-        [self.dimAnimationValueLabel.widthAnchor constraintEqualToConstant:80],
-        [self.dimAnimationSlider.topAnchor constraintEqualToAnchor:dimAnimationLabel.bottomAnchor constant:6],
-        [self.dimAnimationSlider.leadingAnchor constraintEqualToAnchor:settingsView.leadingAnchor constant:14],
-        [self.dimAnimationSlider.trailingAnchor constraintEqualToAnchor:settingsView.trailingAnchor constant:-14],
-        [self.dimAnimationSlider.bottomAnchor constraintEqualToAnchor:settingsView.bottomAnchor constant:-14],
+        [self.dimOpacitySlider.bottomAnchor constraintEqualToAnchor:settingsView.bottomAnchor constant:-14],
         [settingsView.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor constant:-28],
     ]];
 }
@@ -380,6 +438,18 @@ static void appLog(NSString *format, ...) {
     } else {
         self.statusLabel.text = @"Chua chon anh";
     }
+
+    self.previewImageView2.image = self.selectedImage2;
+    self.showButton2.enabled = self.selectedImage2 != nil;
+    self.showButton2.alpha = self.selectedImage2 ? 1.0 : 0.45;
+    self.deleteButton2.enabled = YES;
+    self.deleteButton2.alpha = 1.0;
+
+    if (self.selectedImage2) {
+        self.status2Label.text = [NSString stringWithFormat:@"Da chon anh 2 %.0fx%.0f", self.selectedImage2.size.width, self.selectedImage2.size.height];
+    } else {
+        self.status2Label.text = @"Chua chon anh 2";
+    }
 }
 
 - (void)loadSettings {
@@ -387,7 +457,6 @@ static void appLog(NSString *format, ...) {
     self.hideDelaySlider.value = settings[@"hideDelayMs"] ? [settings[@"hideDelayMs"] floatValue] : 0.0;
     self.showDelaySlider.value = settings[@"showDelayMs"] ? [settings[@"showDelayMs"] floatValue] : 0.0;
     self.dimOpacitySlider.value = settings[@"dimOpacity"] ? [settings[@"dimOpacity"] floatValue] : 1.0;
-    self.dimAnimationSlider.value = settings[@"dimAnimationMs"] ? [settings[@"dimAnimationMs"] floatValue] : 0.0;
     [self updateSettingsLabels];
 }
 
@@ -395,7 +464,6 @@ static void appLog(NSString *format, ...) {
     self.hideDelayValueLabel.text = [NSString stringWithFormat:@"%ld ms", (long)self.hideDelaySlider.value];
     self.showDelayValueLabel.text = [NSString stringWithFormat:@"%ld ms", (long)self.showDelaySlider.value];
     self.dimOpacityValueLabel.text = [NSString stringWithFormat:@"%.0f%%", self.dimOpacitySlider.value * 100.0];
-    self.dimAnimationValueLabel.text = [NSString stringWithFormat:@"%ld ms", (long)self.dimAnimationSlider.value];
 }
 
 - (void)settingsChanged {
@@ -405,7 +473,7 @@ static void appLog(NSString *format, ...) {
         @"hideDelayMs": @((NSInteger)self.hideDelaySlider.value),
         @"showDelayMs": @((NSInteger)self.showDelaySlider.value),
         @"dimOpacity": @(self.dimOpacitySlider.value),
-        @"dimAnimationMs": @((NSInteger)self.dimAnimationSlider.value)
+        @"dimAnimationMs": @0   // bỏ animation: ẩn/hiện tức thì
     };
 
     [NSFileManager.defaultManager createDirectoryAtPath:kOverlayDirectory withIntermediateDirectories:YES attributes:nil error:nil];
@@ -417,7 +485,6 @@ static void appLog(NSString *format, ...) {
     self.hideDelaySlider.value = 0;
     self.showDelaySlider.value = 0;
     self.dimOpacitySlider.value = 1.0;
-    self.dimAnimationSlider.value = 0;
     [self settingsChanged];
 }
 
@@ -434,6 +501,16 @@ static void appLog(NSString *format, ...) {
 }
 
 - (void)chooseImageTapped {
+    self.pickingSlot = 1;
+    [self presentImagePicker];
+}
+
+- (void)chooseImage2Tapped {
+    self.pickingSlot = 2;
+    [self presentImagePicker];
+}
+
+- (void)presentImagePicker {
     // PHPicker (iOS 14+): chạy ngoài tiến trình, bàn giao ảnh qua NSItemProvider (nạp
     // theo yêu cầu) -> bền hơn UIImagePickerController với app no-container/sandbox
     // (vốn hay văng ngay khi chọn ảnh trên iOS 16). KHÔNG cần quyền thư viện ảnh.
@@ -443,28 +520,33 @@ static void appLog(NSString *format, ...) {
         config.filter = [PHPickerFilter imagesFilter];
         PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:config];
         picker.delegate = self;
-        appLog(@"chooseImageTapped: mo PHPicker");
+        appLog(@"presentImagePicker: mo PHPicker slot=%ld", (long)self.pickingSlot);
         [self presentViewController:picker animated:YES completion:nil];
     } @catch (NSException *exception) {
-        appLog(@"chooseImageTapped: PHPicker loi %@ - %@", exception.name, exception.reason);
+        appLog(@"presentImagePicker: PHPicker loi %@ - %@", exception.name, exception.reason);
         self.statusLabel.text = @"Khong mo duoc thu vien anh";
     }
 }
 
 - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
     [picker dismissViewControllerAnimated:YES completion:nil];
-    appLog(@"PHPicker didFinishPicking: %lu ket qua", (unsigned long)results.count);
+    appLog(@"PHPicker didFinishPicking: %lu ket qua (slot=%ld)", (unsigned long)results.count, (long)self.pickingSlot);
+    NSInteger slot = self.pickingSlot;
     if (results.count == 0) {
         return;
     }
 
     NSItemProvider *provider = results.firstObject.itemProvider;
     if (!provider) {
-        [self setSelectedImageAndStatus:nil status:@"Tai anh that bai"];
+        [self setSelectedImageAndStatus:nil slot:slot status:@"Tai anh that bai"];
         return;
     }
 
-    self.statusLabel.text = @"Dang tai anh...";
+    if (slot == 2) {
+        self.status2Label.text = @"Dang tai anh...";
+    } else {
+        self.statusLabel.text = @"Dang tai anh...";
+    }
     __weak typeof(self) weakSelf = self;
     // Nạp DỮ LIỆU thô (không để hệ thống tự giải mã UIImage) rồi tự giảm cỡ qua ImageIO.
     [provider loadDataRepresentationForTypeIdentifier:@"public.image" completionHandler:^(NSData *data, NSError *error) {
@@ -480,9 +562,9 @@ static void appLog(NSString *format, ...) {
                (unsigned long)data.length, image != nil, error.localizedDescription ?: @"-");
         dispatch_async(dispatch_get_main_queue(), ^{
             if (image) {
-                [weakSelf setSelectedImageAndStatus:image status:nil];
+                [weakSelf setSelectedImageAndStatus:image slot:slot status:nil];
             } else {
-                [weakSelf setSelectedImageAndStatus:nil status:@"Tai anh that bai"];
+                [weakSelf setSelectedImageAndStatus:nil slot:slot status:@"Tai anh that bai"];
             }
         });
     }];
@@ -580,7 +662,20 @@ static void appLog(NSString *format, ...) {
     }
 }
 
-- (void)setSelectedImageAndStatus:(UIImage *)image status:(NSString *)status {
+- (void)setSelectedImageAndStatus:(UIImage *)image slot:(NSInteger)slot status:(NSString *)status {
+    if (slot == 2) {
+        self.selectedImage2 = image;
+        @try {
+            self.selectedImageData2 = image ? [self pngDataForImage:image] : nil;
+        } @catch (__unused NSException *exception) {
+            self.selectedImageData2 = nil;
+        }
+        [self updateState];
+        if (status.length) {
+            self.status2Label.text = status;
+        }
+        return;
+    }
     self.selectedImage = image;
     @try {
         self.selectedImageData = image ? [self pngDataForImage:image] : nil;
@@ -679,6 +774,67 @@ static void appLog(NSString *format, ...) {
     notify_post(kOverlayRemoveNotification);
 }
 
+#pragma mark - Ảnh 2 (tuỳ chọn)
+
+- (BOOL)writeFallbackFileForImage2:(UIImage *)image {
+    NSData *pngData = self.selectedImageData2 ?: [self pngDataForImage:image];
+    if (!pngData.length) {
+        return NO;
+    }
+    NSFileManager *fileManager = NSFileManager.defaultManager;
+    [fileManager createDirectoryAtPath:kOverlayDirectory withIntermediateDirectories:YES attributes:nil error:nil];
+    return [pngData writeToFile:kOverlayImage2Path atomically:YES];
+}
+
+- (BOOL)publishImage2ToPasteboard:(UIImage *)image {
+    NSData *pngData = self.selectedImageData2 ?: [self pngDataForImage:image];
+    UIPasteboard *pasteboard = [UIPasteboard pasteboardWithName:kOverlayPasteboard2Name create:YES];
+    if (!pasteboard) {
+        return NO;
+    }
+    if (pngData.length) {
+        [pasteboard setData:pngData forPasteboardType:@"public.png"];
+    }
+    pasteboard.image = image;
+    return pasteboard.image != nil || pngData.length > 0;
+}
+
+// CHỈ xoá kho ảnh 2 (KHÔNG đụng state.plist/hitboxes -> giữ vị trí ảnh 1 & hitbox).
+- (void)clearPublishedImage2 {
+    [UIPasteboard removePasteboardWithName:kOverlayPasteboard2Name];
+    [NSFileManager.defaultManager removeItemAtPath:kOverlayImage2Path error:nil];
+}
+
+- (void)showImage2Tapped {
+    if (!self.selectedImage2) {
+        return;
+    }
+    // KHÔNG reset Delay/Độ mờ (dùng chung với ảnh 1) và KHÔNG xoá state.plist.
+    self.status2Label.text = @"Dang gui anh 2...";
+    [self clearPublishedImage2];
+
+    BOOL wroteFile = [self writeFallbackFileForImage2:self.selectedImage2];
+    BOOL wrotePasteboard = [self publishImage2ToPasteboard:self.selectedImage2];
+    appLog(@"showImage2Tapped: wroteFile=%d wrotePasteboard=%d", wroteFile, wrotePasteboard);
+
+    if (!wroteFile && !wrotePasteboard) {
+        self.status2Label.text = @"Khong gui duoc anh 2";
+        notify_post(kOverlayRemove2Notification);
+        return;
+    }
+    notify_post(kOverlayUpdated2Notification);
+    self.status2Label.text = @"Da gui anh 2 den overlay";
+}
+
+- (void)deleteImage2Tapped {
+    [self clearPublishedImage2];
+    self.selectedImage2 = nil;
+    self.selectedImageData2 = nil;
+    [self updateState];
+    self.status2Label.text = @"Da xoa anh 2";
+    notify_post(kOverlayRemove2Notification);
+}
+
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
     // Ưu tiên giảm cỡ qua ImageIO từ URL (không giải mã ảnh gốc đầy đủ -> không văng).
     // Đọc URL NGAY tại đây vì URL chỉ hợp lệ trong callback (trước khi đóng picker).
@@ -688,15 +844,16 @@ static void appLog(NSString *format, ...) {
     UIImage *rawFallback = fromURL ? nil : (info[UIImagePickerControllerOriginalImage] ?: info[UIImagePickerControllerEditedImage]);
 
     // Đóng picker trước, xử lý ảnh sau (tránh làm nặng ngay trong lúc đóng).
+    NSInteger slot = self.pickingSlot;
     [picker dismissViewControllerAnimated:YES completion:^{
         UIImage *image = fromURL;
         if (!image) {
             image = [self normalizedImageForOverlay:rawFallback];
         }
         if (image) {
-            [self setSelectedImageAndStatus:image status:nil];
+            [self setSelectedImageAndStatus:image slot:slot status:nil];
         } else {
-            [self setSelectedImageAndStatus:nil status:@"Tai anh that bai"];
+            [self setSelectedImageAndStatus:nil slot:slot status:@"Tai anh that bai"];
         }
     }];
 }
