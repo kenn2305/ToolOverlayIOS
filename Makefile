@@ -24,7 +24,7 @@ APPLICATION_NAME = OverlayIOSTOOLApp
 OverlayIOSTOOLApp_ARCHS = arm64
 OverlayIOSTOOLApp_FILES = App/main.m App/AppDelegate.m App/ViewController.m
 OverlayIOSTOOLApp_CFLAGS = -fobjc-arc -O2
-OverlayIOSTOOLApp_FRAMEWORKS = UIKit
+OverlayIOSTOOLApp_FRAMEWORKS = UIKit CoreGraphics ImageIO
 OverlayIOSTOOLApp_RESOURCE_DIRS = Resources
 OverlayIOSTOOLApp_INSTALL_PATH = /Applications
 # Ký app với entitlements thoát sandbox để ghi được ảnh ra /var/mobile/Library

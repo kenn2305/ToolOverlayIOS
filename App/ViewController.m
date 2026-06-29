@@ -1,5 +1,6 @@
 #import "ViewController.h"
 #import <notify.h>
+#import <ImageIO/ImageIO.h>
 
 static NSString * const kOverlayDirectory = @"/var/mobile/Library/OverlayIOSTOOL";
 static NSString * const kOverlayImagePath = @"/var/mobile/Library/OverlayIOSTOOL/overlay.png";
@@ -126,7 +127,6 @@ static void appLog(NSString *format, ...) {
 @property (nonatomic, strong) UILabel *dimOpacityValueLabel;
 @property (nonatomic, strong) UILabel *dimAnimationValueLabel;
 @property (nonatomic, assign) int settingsNotifyToken;
-@property (nonatomic, strong) UIImageView *appOverlayView;
 @end
 
 @implementation ViewController
@@ -464,9 +464,41 @@ static void appLog(NSString *format, ...) {
     [self presentViewController:picker animated:YES completion:nil];
 }
 
-// Giảm kích thước + chuẩn hoá hướng/scale ảnh vừa chọn. Ảnh gốc từ camera (vd iPhone
-// XS Max 12MP ~48MB khi giải mã) tạo nhiều bản sao lớn -> app nhẹ bị OS kill ("văng ra").
-// Vẽ lại ở kích thước vừa phải (scale 1.0) vừa né hết tràn bộ nhớ vừa xoá EXIF orientation.
+// Giảm cỡ ảnh bằng ImageIO ĐỌC THẲNG TỪ FILE -> KHÔNG bao giờ giải mã ảnh gốc đầy đủ
+// vào RAM (ảnh 12MP ~48MB là nguyên nhân văng). Tự áp orientation EXIF. Đây là đường an
+// toàn nhất; nếu không có URL thì mới rơi xuống normalizedImageForOverlay (vẽ UIImage).
+- (UIImage *)downsampledImageFromURL:(NSURL *)url maxPixel:(CGFloat)maxPixel {
+    if (!url) {
+        return nil;
+    }
+    UIImage *result = nil;
+    CGImageSourceRef source = NULL;
+    CGImageRef thumb = NULL;
+    @try {
+        source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+        if (!source) {
+            return nil;
+        }
+        NSDictionary *options = @{
+            (id)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+            (id)kCGImageSourceCreateThumbnailWithTransform: @YES,
+            (id)kCGImageSourceShouldCacheImmediately: @YES,
+            (id)kCGImageSourceThumbnailMaxPixelSize: @((int)maxPixel),
+        };
+        thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+        if (thumb) {
+            result = [UIImage imageWithCGImage:thumb scale:1.0 orientation:UIImageOrientationUp];
+        }
+    } @catch (__unused NSException *exception) {
+        result = nil;
+    }
+    if (thumb) { CGImageRelease(thumb); }
+    if (source) { CFRelease(source); }
+    return result;
+}
+
+// Giảm kích thước + chuẩn hoá hướng/scale ảnh vừa chọn (đường dự phòng khi không có URL).
+// Vẽ lại ở kích thước vừa phải (scale 1.0) vừa né tràn bộ nhớ vừa xoá EXIF orientation.
 - (UIImage *)normalizedImageForOverlay:(UIImage *)image {
     if (!image || image.size.width <= 0 || image.size.height <= 0) {
         return image;
@@ -572,67 +604,7 @@ static void appLog(NSString *format, ...) {
 
     notify_post(kOverlayUpdatedNotification);
     appLog(@"showImageTapped: da post notify 'image-updated' -> cho SpringBoard hien");
-    [self showAppOverlay];
     self.statusLabel.text = @"Da gui anh den overlay";
-}
-
-- (UIWindow *)appKeyWindow {
-    UIWindow *win = self.view.window;
-    if (win) return win;
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:UIWindowScene.class]) continue;
-        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-            if (w.isKeyWindow) return w;
-        }
-        UIWindow *any = ((UIWindowScene *)scene).windows.firstObject;
-        if (any) return any;
-    }
-    return nil;
-}
-
-- (void)showAppOverlay {
-    if (!self.selectedImage) return;
-    UIWindow *win = [self appKeyWindow];
-    if (!win) return;
-
-    if (!self.appOverlayView) {
-        self.appOverlayView = [UIImageView new];
-        self.appOverlayView.userInteractionEnabled = YES;
-        self.appOverlayView.contentMode = UIViewContentModeScaleAspectFit;
-        [self.appOverlayView addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleAppOverlayPan:)]];
-        [self.appOverlayView addGestureRecognizer:[[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handleAppOverlayPinch:)]];
-    }
-    self.appOverlayView.image = self.selectedImage;
-
-    CGSize imgSize = self.selectedImage.size;
-    CGFloat scale = 1.0;
-    if (imgSize.width > 0 && imgSize.height > 0) {
-        scale = MIN(win.bounds.size.width * 0.6 / imgSize.width, win.bounds.size.height * 0.6 / imgSize.height);
-        scale = MIN(MAX(scale, 0.05), 1.0);
-    }
-    CGSize shown = CGSizeMake(imgSize.width * scale, imgSize.height * scale);
-    if (shown.width < 40) shown = CGSizeMake(160, 160);
-    self.appOverlayView.frame = CGRectMake((win.bounds.size.width - shown.width) / 2.0,
-                                           (win.bounds.size.height - shown.height) / 2.0,
-                                           shown.width, shown.height);
-    [win addSubview:self.appOverlayView];
-    [win bringSubviewToFront:self.appOverlayView];
-}
-
-- (void)handleAppOverlayPan:(UIPanGestureRecognizer *)g {
-    UIView *v = g.view;
-    CGPoint t = [g translationInView:v.superview];
-    v.center = CGPointMake(v.center.x + t.x, v.center.y + t.y);
-    [g setTranslation:CGPointZero inView:v.superview];
-}
-
-- (void)handleAppOverlayPinch:(UIPinchGestureRecognizer *)g {
-    UIView *v = g.view;
-    CGSize ns = CGSizeMake(v.bounds.size.width * g.scale, v.bounds.size.height * g.scale);
-    if (ns.width >= 30 && ns.height >= 30) {
-        v.bounds = CGRectMake(0, 0, ns.width, ns.height);
-    }
-    g.scale = 1.0;
 }
 
 - (void)clearPublishedImage {
@@ -643,8 +615,6 @@ static void appLog(NSString *format, ...) {
 
 - (void)deleteImageTapped {
     [self clearPublishedImage];
-    [self.appOverlayView removeFromSuperview];
-    self.appOverlayView = nil;
     self.selectedImage = nil;
     self.selectedImageData = nil;
     [self updateState];
@@ -653,14 +623,19 @@ static void appLog(NSString *format, ...) {
 }
 
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
-    UIImage *raw = info[UIImagePickerControllerOriginalImage];
-    if (!raw) {
-        raw = info[UIImagePickerControllerEditedImage];
-    }
-    // Chuẩn hoá/giảm cỡ NGAY (tránh tràn bộ nhớ -> văng) trước khi giữ tham chiếu ảnh gốc.
-    UIImage *image = [self normalizedImageForOverlay:raw];
+    // Ưu tiên giảm cỡ qua ImageIO từ URL (không giải mã ảnh gốc đầy đủ -> không văng).
+    // Đọc URL NGAY tại đây vì URL chỉ hợp lệ trong callback (trước khi đóng picker).
+    NSURL *url = info[UIImagePickerControllerImageURL];
+    UIImage *fromURL = [self downsampledImageFromURL:url maxPixel:1500.0];
+    // Chỉ giữ ảnh gốc (lớn) khi ImageIO thất bại -> tránh ôm 48MB trong block.
+    UIImage *rawFallback = fromURL ? nil : (info[UIImagePickerControllerOriginalImage] ?: info[UIImagePickerControllerEditedImage]);
 
+    // Đóng picker trước, xử lý ảnh sau (tránh làm nặng ngay trong lúc đóng).
     [picker dismissViewControllerAnimated:YES completion:^{
+        UIImage *image = fromURL;
+        if (!image) {
+            image = [self normalizedImageForOverlay:rawFallback];
+        }
         if (image) {
             [self setSelectedImageAndStatus:image status:nil];
         } else {
