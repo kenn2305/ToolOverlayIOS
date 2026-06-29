@@ -193,10 +193,6 @@ static inline UIImageView *activeImageView(void) {
 static inline UIImageView *editingImageView(void) {
     return imageViewAtIndex(gEditingImageIndex);
 }
-// Ảnh mà thao tác hiện tại tác động: viền xanh -> ảnh focus; thường -> ảnh đang hiện.
-static inline UIImageView *contextImageView(void) {
-    return gScaleLockModeEnabled ? editingImageView() : activeImageView();
-}
 static inline BOOL hasSecondImage(void) {
     return gOverlayImageView2 != nil;
 }
