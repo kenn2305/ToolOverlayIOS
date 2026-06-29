@@ -737,7 +737,8 @@ static void appLog(NSString *format, ...) {
     }
 
     self.statusLabel.text = @"Dang gui anh...";
-    [self resetSettingsForNewImage];
+    // KHÔNG reset Delay/Độ mờ nữa: đây là cài đặt DÙNG CHUNG cho cả 2 ảnh -> giữ nguyên
+    // giá trị người dùng đã chọn (trước đây reset độ mờ về 100% làm hitbox "Mờ" vô hiệu).
     [self clearPublishedImage];
 
     BOOL wroteFile = [self writeFallbackFileForImage:self.selectedImage];
