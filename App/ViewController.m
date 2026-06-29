@@ -7,6 +7,7 @@ static NSString * const kOverlayDirectory = @"/var/mobile/Library/OverlayIOSTOOL
 static NSString * const kOverlayImagePath = @"/var/mobile/Library/OverlayIOSTOOL/overlay.png";
 static NSString * const kOverlaySettingsPath = @"/var/mobile/Library/OverlayIOSTOOL/settings.plist";
 static NSString * const kOverlayStatePath = @"/var/mobile/Library/OverlayIOSTOOL/state.plist";
+static NSString * const kOverlayHitboxesPath = @"/var/mobile/Library/OverlayIOSTOOL/hitboxes.plist";
 static NSString * const kOverlayPasteboardName = @"com.vietanh.overlayiostool.image";
 static NSString * const kOverlayLogPath = @"/var/mobile/Library/OverlayIOSTOOL/tweak.log";
 static const char *kOverlayUpdatedNotification = "com.vietanh.overlayiostool.image-updated";
@@ -689,6 +690,7 @@ static void appLog(NSString *format, ...) {
 
 - (void)deleteImageTapped {
     [self clearPublishedImage];
+    [NSFileManager.defaultManager removeItemAtPath:kOverlayHitboxesPath error:nil];   // xoá ảnh -> xoá hitbox
     self.selectedImage = nil;
     self.selectedImageData = nil;
     [self updateState];

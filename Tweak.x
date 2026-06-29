@@ -119,6 +119,19 @@ static int gSbToggleStateToken = 0;     // SpringBoard: set state toggle-active
 static int gAppToggleStateToken = 0;    // App: đọc state toggle-active
 static int gAppTouchLocToken = 0;       // App: set toạ độ chạm; SpringBoard: đọc toạ độ chạm
 
+// ===== HITBOX =====
+// Hitbox = vùng "trigger" trong toạ độ root (màn hình). type 0 = Hiện (ảnh đang mờ ->
+// rõ), type 1 = Mờ (ảnh đang rõ -> mờ). Tàng hình ở chế độ thường, hiện + chỉnh ở viền
+// xanh. Tối đa 8 mỗi loại.
+static NSString * const kOverlayHitboxesPath = @"/var/mobile/Library/OverlayIOSTOOL/hitboxes.plist";
+static const NSInteger kOverlayMaxHitboxesPerType = 8;
+static NSMutableArray<NSMutableDictionary *> *gHitboxes = nil;   // dữ liệu {type,x,y,w,h}
+static NSMutableArray<UIView *> *gHitboxViews = nil;             // ô hiển thị (viền xanh)
+static NSInteger gSelectedIndex = -1;   // -1 = ảnh, >=0 = chỉ số hitbox đang chọn
+static UISlider *gSizeXSlider = nil;     // chiều RỘNG (cạnh dưới)
+static UISlider *gSizeYSlider = nil;     // chiều CAO (cạnh phải)
+static UIView *gHitboxToolbar = nil;     // thanh +Hiện / +Mờ / Xoá / Xong
+
 typedef struct __attribute__((packed)) {
     uint32_t magic;
     uint32_t version;
@@ -141,6 +154,14 @@ static void refreshOverlayWindowVisibility(void);
 static void updateScaleLockControlsVisibility(void);
 static void updateOverlayControlValues(void);
 static UIWindowScene *foregroundOverlayScene(void);
+static void applyScaleLockMode(BOOL enabled);
+static void persistOverlayState(BOOL broadcast);
+static void loadHitboxes(void);
+static void saveHitboxes(void);
+static void clearAllHitboxes(void);
+static void rebuildHitboxViews(void);
+static void updateHitboxEditUIForSelection(void);
+static void applyOverlayDimmed(BOOL dimmed);
 
 static NSString * const kOverlayLogPath = @"/var/mobile/Library/OverlayIOSTOOL/tweak.log";
 
@@ -188,15 +209,8 @@ static void overlayLog(NSString *format, ...) {
     }
 
     if (gScaleLockModeEnabled) {
-        if (gScaleLockControlsPanel && !gScaleLockControlsPanel.hidden && [hitView isDescendantOfView:gScaleLockControlsPanel]) {
-            return hitView;
-        }
-        if (CGRectContainsPoint(self.bounds, point)) {
-            if (!hitView || hitView == self) {
-                return self;
-            }
-            return hitView;
-        }
+        // Viền xanh: bắt toàn màn. Nếu chạm trúng UI con (slider/toolbar/nút, ảnh) thì
+        // trả về nó để nhận chạm; vùng trống trả về root (xử lý chọn/kéo trong sendEvent).
         if (!hitView || hitView == self) {
             return self;
         }
@@ -1300,7 +1314,8 @@ static void showOverlayImage(UIImage *image, BOOL resetFrame) {
             doReset = YES;  // view vừa tạo -> luôn căn giữa theo ảnh
         }
         updateExpandedPinchGesture();
-        ensureScaleLockControls();
+        loadHitboxes();          // nạp hitbox đã lưu
+        rebuildHitboxViews();    // dựng ô (ẩn ở chế độ thường)
 
         gOverlayImageView.image = rendersOverlayImage() ? image : nil;
 
@@ -1375,10 +1390,10 @@ static void removeOverlay(void) {
             gOverlayImageView = nil;
         }
 
-        if (gScaleLockControlsPanel) {
-            [gScaleLockControlsPanel removeFromSuperview];
-            gScaleLockControlsPanel = nil;
-        }
+        clearAllHitboxes();           // xoá ảnh -> xoá luôn mọi hitbox
+        gHitboxToolbar = nil;
+        gSizeXSlider = nil;
+        gSizeYSlider = nil;
 
         if (gOverlayRoot) {
             [gOverlayRoot removeFromSuperview];
@@ -1402,6 +1417,7 @@ static void clearPublishedStorage(void) {
     [UIPasteboard removePasteboardWithName:kOverlayPasteboardName];
     [NSFileManager.defaultManager removeItemAtPath:kOverlayImagePath error:nil];
     [NSFileManager.defaultManager removeItemAtPath:kOverlayStatePath error:nil];
+    [NSFileManager.defaultManager removeItemAtPath:kOverlayHitboxesPath error:nil];
 }
 
 static void __attribute__((unused)) stopOverlayTool(void) {
@@ -1460,6 +1476,300 @@ static void applyOverlayDimmed(BOOL dimmed) {
     persistOverlayState(YES);
 }
 
+// ===================== HITBOX: model + lưu trữ =====================
+static void loadHitboxes(void) {
+    if (!gHitboxes) gHitboxes = [NSMutableArray array];
+    [gHitboxes removeAllObjects];
+    NSArray *arr = [NSArray arrayWithContentsOfFile:kOverlayHitboxesPath];
+    if ([arr isKindOfClass:NSArray.class]) {
+        for (id item in arr) {
+            if (![item isKindOfClass:NSDictionary.class]) continue;
+            NSDictionary *d = item;
+            NSMutableDictionary *h = [NSMutableDictionary dictionary];
+            h[@"type"] = @([d[@"type"] integerValue] == 1 ? 1 : 0);
+            h[@"x"] = @([d[@"x"] doubleValue]);
+            h[@"y"] = @([d[@"y"] doubleValue]);
+            h[@"w"] = @(MAX(20.0, [d[@"w"] doubleValue]));
+            h[@"h"] = @(MAX(20.0, [d[@"h"] doubleValue]));
+            [gHitboxes addObject:h];
+        }
+    }
+}
+
+static void saveHitboxes(void) {
+    if (gApplyingRemoteState) return;
+    [NSFileManager.defaultManager createDirectoryAtPath:kOverlayDirectory withIntermediateDirectories:YES attributes:nil error:nil];
+    [(gHitboxes ?: @[]) writeToFile:kOverlayHitboxesPath atomically:YES];
+}
+
+static NSInteger countHitboxesOfType(NSInteger type) {
+    NSInteger n = 0;
+    for (NSDictionary *h in gHitboxes) {
+        if ([h[@"type"] integerValue] == type) n++;
+    }
+    return n;
+}
+
+static CGRect hitboxRectAt(NSInteger index) {
+    if (index < 0 || index >= (NSInteger)gHitboxes.count) return CGRectZero;
+    NSDictionary *h = gHitboxes[index];
+    return CGRectMake([h[@"x"] doubleValue], [h[@"y"] doubleValue], [h[@"w"] doubleValue], [h[@"h"] doubleValue]);
+}
+
+// Hitbox trên cùng chứa điểm p (toạ độ root). -1 nếu không trúng.
+static NSInteger hitboxIndexAtPoint(CGPoint p) {
+    for (NSInteger i = (NSInteger)gHitboxes.count - 1; i >= 0; i--) {
+        if (CGRectContainsPoint(hitboxRectAt(i), p)) return i;
+    }
+    return -1;
+}
+
+static UIColor *hitboxColorForType(NSInteger type) {
+    return type == 0 ? UIColor.systemGreenColor : UIColor.systemRedColor;
+}
+
+// ===================== HITBOX: hiển thị (viền xanh) =====================
+static void updateHitboxSelectionHighlight(void) {
+    for (NSUInteger i = 0; i < gHitboxViews.count && i < gHitboxes.count; i++) {
+        UIView *v = gHitboxViews[i];
+        BOOL sel = ((NSInteger)i == gSelectedIndex);
+        NSInteger type = [gHitboxes[i][@"type"] integerValue];
+        v.layer.borderWidth = sel ? 4.0 : 2.0;
+        v.backgroundColor = [hitboxColorForType(type) colorWithAlphaComponent:(sel ? 0.32 : 0.15)];
+    }
+    if (gOverlayImageView) {
+        BOOL imgSel = (gSelectedIndex < 0);
+        gOverlayImageView.layer.borderWidth = gScaleLockModeEnabled ? (imgSel ? 4.0 : 2.0) : 0.0;
+        gOverlayImageView.layer.borderColor = gScaleLockModeEnabled ? UIColor.systemBlueColor.CGColor : nil;
+    }
+}
+
+static void rebuildHitboxViews(void) {
+    if (!gOverlayRoot) return;
+    if (!gHitboxViews) gHitboxViews = [NSMutableArray array];
+    for (UIView *v in gHitboxViews) [v removeFromSuperview];
+    [gHitboxViews removeAllObjects];
+
+    for (NSUInteger i = 0; i < gHitboxes.count; i++) {
+        NSInteger type = [gHitboxes[i][@"type"] integerValue];
+        UIView *v = [[UIView alloc] initWithFrame:hitboxRectAt((NSInteger)i)];
+        v.userInteractionEnabled = NO;   // chỉ là hình; chọn bằng toạ độ trong sendEvent
+        v.layer.borderColor = hitboxColorForType(type).CGColor;
+        v.layer.cornerRadius = 6.0;
+        v.hidden = !gScaleLockModeEnabled;
+        [gOverlayRoot addSubview:v];
+        [gHitboxViews addObject:v];
+    }
+    if (gOverlayImageView) [gOverlayRoot bringSubviewToFront:gOverlayImageView];
+    if (gHitboxToolbar) [gOverlayRoot bringSubviewToFront:gHitboxToolbar];
+    if (gSizeXSlider) [gOverlayRoot bringSubviewToFront:gSizeXSlider];
+    if (gSizeYSlider) [gOverlayRoot bringSubviewToFront:gSizeYSlider];
+    updateHitboxSelectionHighlight();
+}
+
+static void setHitboxViewsHidden(BOOL hidden) {
+    for (UIView *v in gHitboxViews) v.hidden = hidden;
+}
+
+// ===================== HITBOX: phần tử đang chọn (ảnh/hitbox) =====================
+static CGRect selectedElementFrame(void) {
+    if (gSelectedIndex < 0) {
+        return gOverlayImageView ? gOverlayImageView.frame : CGRectZero;
+    }
+    return hitboxRectAt(gSelectedIndex);
+}
+
+static void setSelectedElementFrame(CGRect f) {
+    if (gSelectedIndex < 0) {
+        if (gOverlayImageView) gOverlayImageView.frame = f;
+        return;
+    }
+    if (gSelectedIndex >= (NSInteger)gHitboxes.count) return;
+    NSMutableDictionary *h = gHitboxes[gSelectedIndex];
+    h[@"x"] = @(f.origin.x); h[@"y"] = @(f.origin.y);
+    h[@"w"] = @(f.size.width); h[@"h"] = @(f.size.height);
+    if (gSelectedIndex < (NSInteger)gHitboxViews.count) {
+        gHitboxViews[gSelectedIndex].frame = f;
+    }
+}
+
+// ===================== HITBOX: UI chỉnh sửa (2 slider + toolbar) =====================
+static void hitboxResizeWidth(CGFloat newW);
+static void hitboxResizeHeight(CGFloat newH);
+static void overlayAddHitbox(NSInteger type);
+static void overlayRemoveSelectedHitbox(void);
+
+@interface OverlayHitboxTarget : NSObject
+@end
+@implementation OverlayHitboxTarget
+- (void)sizeXChanged:(UISlider *)s { hitboxResizeWidth(s.value); }
+- (void)sizeYChanged:(UISlider *)s { hitboxResizeHeight(s.value); }
+- (void)addShow { overlayAddHitbox(0); }
+- (void)addDim { overlayAddHitbox(1); }
+- (void)removeSel { overlayRemoveSelectedHitbox(); }
+- (void)doneEdit { applyScaleLockMode(NO); }
+@end
+static OverlayHitboxTarget *gHitboxTarget = nil;
+
+static void updateHitboxEditUIForSelection(void) {
+    if (gSizeXSlider && !gSizeXSlider.tracking) {
+        CGFloat w = selectedElementFrame().size.width;
+        gSizeXSlider.value = MIN(MAX(w, gSizeXSlider.minimumValue), gSizeXSlider.maximumValue);
+    }
+    if (gSizeYSlider && !gSizeYSlider.tracking) {
+        CGFloat h = selectedElementFrame().size.height;
+        gSizeYSlider.value = MIN(MAX(h, gSizeYSlider.minimumValue), gSizeYSlider.maximumValue);
+    }
+}
+
+static void hitboxResizeWidth(CGFloat newW) {
+    CGRect f = selectedElementFrame();
+    if (f.size.width <= 0) return;
+    CGPoint c = CGPointMake(CGRectGetMidX(f), CGRectGetMidY(f));
+    CGFloat newH = f.size.height;
+    if (gSelectedIndex < 0) {                 // ẢNH: đồng bộ -> giữ tỉ lệ
+        CGFloat scale = newW / MAX(f.size.width, 1.0);
+        newH = f.size.height * scale;
+        if (gSizeYSlider && !gSizeYSlider.tracking) gSizeYSlider.value = MIN(MAX(newH, gSizeYSlider.minimumValue), gSizeYSlider.maximumValue);
+    }
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    setSelectedElementFrame(CGRectMake(c.x - newW/2.0, c.y - newH/2.0, newW, newH));
+    [CATransaction commit];
+    if (gSelectedIndex < 0) persistOverlayState(NO); else saveHitboxes();
+}
+
+static void hitboxResizeHeight(CGFloat newH) {
+    CGRect f = selectedElementFrame();
+    if (f.size.height <= 0) return;
+    CGPoint c = CGPointMake(CGRectGetMidX(f), CGRectGetMidY(f));
+    CGFloat newW = f.size.width;
+    if (gSelectedIndex < 0) {                 // ẢNH: đồng bộ -> giữ tỉ lệ
+        CGFloat scale = newH / MAX(f.size.height, 1.0);
+        newW = f.size.width * scale;
+        if (gSizeXSlider && !gSizeXSlider.tracking) gSizeXSlider.value = MIN(MAX(newW, gSizeXSlider.minimumValue), gSizeXSlider.maximumValue);
+    }
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    setSelectedElementFrame(CGRectMake(c.x - newW/2.0, c.y - newH/2.0, newW, newH));
+    [CATransaction commit];
+    if (gSelectedIndex < 0) persistOverlayState(NO); else saveHitboxes();
+}
+
+static void overlayAddHitbox(NSInteger type) {
+    if (!gOverlayRoot) return;
+    if (countHitboxesOfType(type) >= kOverlayMaxHitboxesPerType) return;
+    if (!gHitboxes) gHitboxes = [NSMutableArray array];
+    CGRect b = gOverlayRoot.bounds;
+    CGFloat w = 130, h = 70;
+    NSMutableDictionary *hb = [NSMutableDictionary dictionary];
+    hb[@"type"] = @(type);
+    hb[@"x"] = @((b.size.width - w)/2.0);
+    hb[@"y"] = @((b.size.height - h)/2.0);
+    hb[@"w"] = @(w);
+    hb[@"h"] = @(h);
+    [gHitboxes addObject:hb];
+    gSelectedIndex = (NSInteger)gHitboxes.count - 1;
+    rebuildHitboxViews();
+    updateHitboxEditUIForSelection();
+    saveHitboxes();
+}
+
+static void overlayRemoveSelectedHitbox(void) {
+    if (gSelectedIndex < 0 || gSelectedIndex >= (NSInteger)gHitboxes.count) return;
+    [gHitboxes removeObjectAtIndex:gSelectedIndex];
+    gSelectedIndex = -1;   // quay về chọn ảnh
+    rebuildHitboxViews();
+    updateHitboxEditUIForSelection();
+    saveHitboxes();
+}
+
+static void clearAllHitboxes(void) {
+    if (gHitboxViews) { for (UIView *v in gHitboxViews) [v removeFromSuperview]; [gHitboxViews removeAllObjects]; }
+    if (gHitboxes) [gHitboxes removeAllObjects];
+    gSelectedIndex = -1;
+    [NSFileManager.defaultManager removeItemAtPath:kOverlayHitboxesPath error:nil];
+}
+
+static UIButton *hitboxToolButton(NSString *title, UIColor *color, SEL action) {
+    UIButton *bt = [UIButton buttonWithType:UIButtonTypeSystem];
+    [bt setTitle:title forState:UIControlStateNormal];
+    [bt setTitleColor:color forState:UIControlStateNormal];
+    bt.titleLabel.font = [UIFont systemFontOfSize:15 weight:kOverlayFontWeightSemibold];
+    [bt addTarget:gHitboxTarget action:action forControlEvents:UIControlEventTouchUpInside];
+    return bt;
+}
+
+static void ensureHitboxEditUI(void) {
+    if (!gOverlayRoot) return;
+    if (!gHitboxTarget) gHitboxTarget = [OverlayHitboxTarget new];
+    UIView *root = gOverlayRoot;
+    CGRect b = root.bounds;
+    CGFloat safeTop = gOverlayHostWindow ? MAX(gOverlayHostWindow.safeAreaInsets.top, 30.0) : 44.0;
+    CGFloat safeBottom = gOverlayHostWindow ? gOverlayHostWindow.safeAreaInsets.bottom : 0.0;
+
+    if (!gHitboxToolbar) {
+        gHitboxToolbar = [[UIView alloc] init];
+        gHitboxToolbar.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.92];
+        gHitboxToolbar.layer.cornerRadius = 10.0;
+        [root addSubview:gHitboxToolbar];
+        UIButton *bShow = hitboxToolButton(@"+ Hiện", UIColor.systemGreenColor, @selector(addShow));
+        UIButton *bDim = hitboxToolButton(@"+ Mờ", UIColor.systemRedColor, @selector(addDim));
+        UIButton *bDel = hitboxToolButton(@"Xoá", UIColor.whiteColor, @selector(removeSel));
+        UIButton *bDone = hitboxToolButton(@"Xong", [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0], @selector(doneEdit));
+        UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[bShow, bDim, bDel, bDone]];
+        stack.axis = UILayoutConstraintAxisHorizontal;
+        stack.distribution = UIStackViewDistributionFillEqually;
+        stack.tag = 7788;
+        [gHitboxToolbar addSubview:stack];
+    }
+    gHitboxToolbar.frame = CGRectMake(10, safeTop, b.size.width - 20, 42);
+    UIView *stack = [gHitboxToolbar viewWithTag:7788];
+    stack.frame = gHitboxToolbar.bounds;
+
+    if (!gSizeXSlider) {
+        gSizeXSlider = [UISlider new];
+        gSizeXSlider.minimumValue = 20.0;
+        gSizeXSlider.minimumTrackTintColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0];
+        [gSizeXSlider addTarget:gHitboxTarget action:@selector(sizeXChanged:) forControlEvents:UIControlEventValueChanged];
+        [root addSubview:gSizeXSlider];
+    }
+    gSizeXSlider.maximumValue = b.size.width;
+    gSizeXSlider.frame = CGRectMake(28, b.size.height - safeBottom - 46, b.size.width - 76, 30);
+
+    if (!gSizeYSlider) {
+        gSizeYSlider = [UISlider new];
+        gSizeYSlider.minimumValue = 20.0;
+        gSizeYSlider.minimumTrackTintColor = [UIColor colorWithRed:0.2 green:0.6 blue:1.0 alpha:1.0];
+        [gSizeYSlider addTarget:gHitboxTarget action:@selector(sizeYChanged:) forControlEvents:UIControlEventValueChanged];
+        [root addSubview:gSizeYSlider];
+    }
+    gSizeYSlider.maximumValue = b.size.height;
+    CGFloat vLen = b.size.height - safeTop - 150.0;
+    if (vLen < 120) vLen = 120;
+    gSizeYSlider.transform = CGAffineTransformIdentity;
+    gSizeYSlider.frame = CGRectMake(0, 0, vLen, 30);
+    gSizeYSlider.transform = CGAffineTransformMakeRotation(-M_PI_2);
+    gSizeYSlider.center = CGPointMake(b.size.width - 22, safeTop + 60 + vLen/2.0);
+}
+
+static void setHitboxEditUIHidden(BOOL hidden) {
+    gHitboxToolbar.hidden = hidden;
+    gSizeXSlider.hidden = hidden;
+    gSizeYSlider.hidden = hidden;
+}
+
+// Điểm có nằm trên UI chỉnh sửa (slider/toolbar) không -> để không nhầm thành kéo phần tử.
+static BOOL pointOnHitboxEditUI(CGPoint pInRoot) {
+    UIView *controls[3] = { gHitboxToolbar, gSizeXSlider, gSizeYSlider };
+    for (int i = 0; i < 3; i++) {
+        UIView *c = controls[i];
+        if (c && !c.hidden) {
+            CGPoint lp = [c convertPoint:pInRoot fromView:gOverlayRoot];
+            if ([c pointInside:lp withEvent:nil]) return YES;
+        }
+    }
+    return NO;
+}
+
 static void applyScaleLockMode(BOOL enabled) {
     if (!gOverlayImageView) {
         gScaleLockModeEnabled = NO;
@@ -1494,16 +1804,21 @@ static void applyScaleLockMode(BOOL enabled) {
         }
         gOverlayImageView.hidden = NO;
         applyOverlayAlpha();
-        gOverlayImageView.layer.borderWidth = rendersOverlayImage() ? 3.0 : 0.0;
-        gOverlayImageView.layer.borderColor = rendersOverlayImage() ? UIColor.systemBlueColor.CGColor : nil;
+        gSelectedIndex = -1;               // vào viền xanh: mặc định chọn ẢNH
+        ensureHitboxEditUI();
+        rebuildHitboxViews();              // hiện các hitbox
+        setHitboxViewsHidden(NO);
+        setHitboxEditUIHidden(NO);
+        updateHitboxEditUIForSelection();
+        updateHitboxSelectionHighlight();
     } else {
         gOverlayImageView.layer.borderWidth = 0;
         gOverlayImageView.layer.borderColor = nil;
+        setHitboxViewsHidden(YES);         // thoát: hitbox tàng hình
+        setHitboxEditUIHidden(YES);
     }
 
     refreshOverlayWindowVisibility();
-    updateScaleLockControlsVisibility();
-    updateOverlayControlValues();
     persistOverlayState(YES);
     NSLog(@"[OverlayIOSTOOL] Scale lock mode %@", enabled ? @"ON" : @"OFF");
 }
@@ -1521,6 +1836,21 @@ static void __attribute__((unused)) scheduleToggleOverlayVisibility(void) {
             return;
         }
         applyOverlayDimmed(targetDimmed);
+    });
+}
+
+// Đặt mờ/rõ theo HƯỚNG (không toggle) với delay tương ứng. Dùng cho hitbox.
+static void scheduleSetOverlayDimmed(BOOL dimmed) {
+    if (!gOverlayImageView || gOverlayDimmed == dimmed) {
+        return;
+    }
+    NSInteger delayMs = dimmed ? gHideDelayMs : gShowDelayMs;
+    NSUInteger generation = ++gToggleGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayMs * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+        if (generation != gToggleGeneration) {
+            return;
+        }
+        applyOverlayDimmed(dimmed);
     });
 }
 
@@ -1542,11 +1872,34 @@ static BOOL touchInsideOverlayImage(UITouch *touch) {
     return pointInsideOverlayImage(overlayPoint);
 }
 
+// CHẾ ĐỘ THƯỜNG - quyết định 1 cú chạm (toạ độ root):
+//  trúng hitbox Hiện -> làm RÕ (nếu đang mờ); trúng hitbox Mờ -> làm MỜ (nếu đang rõ);
+//  trúng ẢNH -> panel nạp/rút; còn lại -> KHÔNG gì (thao tác app tự do).
+// Mờ/rõ chỉ chạy khi bật toggle-click (công tắc tổng); panel luôn chạy.
+static void overlayTriggerAtPoint(CGPoint p) {
+    if (gScaleLockModeEnabled || !gOverlayImageView) {
+        return;
+    }
+    NSInteger idx = hitboxIndexAtPoint(p);
+    if (idx >= 0) {
+        if (!gToggleClickEnabled) {
+            return;
+        }
+        NSInteger type = [gHitboxes[idx][@"type"] integerValue];
+        scheduleSetOverlayDimmed(type == 1);   // 0=Hiện -> rõ(NO), 1=Mờ -> mờ(YES)
+        return;
+    }
+    CGRect zone = CGRectInset(gOverlayImageView.frame, -28.0, -28.0);
+    if (pointInsideOverlayImage(p) || CGRectContainsPoint(zone, p)) {
+        showOverlayQuickActions();
+    }
+}
+
 // Zoom 2 ngón TỰ TÍNH (không qua UIPinchGestureRecognizer - vốn hay không nhận diện
 // trên cửa sổ overlay không-key). Lấy đúng 2 touch đầu đang chạm, đo khoảng cách, scale
 // kích thước ảnh theo tỉ lệ so với lúc bắt đầu nhúm. Viền xanh: 2 ngón ở đâu cũng được.
 // Chế độ thường: chỉ zoom khi CẢ 2 ngón nằm trong ảnh.
-static void overlayHandleManualPinch(UIEvent *event) {
+static void __attribute__((unused)) overlayHandleManualPinch(UIEvent *event) {
     if (!gOverlayImageView || gOverlayImageView.hidden || !gOverlayRoot || event.type != UIEventTypeTouches) {
         gManualPinchActive = NO;
         return;
@@ -1609,18 +1962,17 @@ static void overlayHandleManualPinch(UIEvent *event) {
     }
 }
 
-// Ngón đang chạm vào bảng điều khiển (sliders/nút) của viền xanh? -> không coi là pan/giữ.
+// Ngón đang chạm vào UI chỉnh sửa (sliders/toolbar) của viền xanh? -> không coi là pan/giữ.
 static BOOL touchOnScaleLockControls(UITouch *touch) {
-    if (!touch || !gScaleLockControlsPanel || gScaleLockControlsPanel.hidden || !gOverlayRoot) {
+    if (!touch || !gScaleLockModeEnabled || !gOverlayRoot) {
         return NO;
     }
     CGPoint p = [touch locationInView:gOverlayRoot];
-    return pointInsideScaleLockControls(p);
+    return pointOnHitboxEditUI(p);
 }
 
-// Di chuyển ảnh bằng 1 ngón TỰ TÍNH (không qua UIPanGestureRecognizer). CHỈ ở viền xanh:
-// 1 ngón ở BẤT KỲ đâu trên màn hình -> kéo ảnh theo. Bỏ qua khi chạm vào bảng điều khiển
-// hoặc khi đang nhúm 2 ngón.
+// Di chuyển phần tử ĐANG CHỌN (ảnh hoặc hitbox) bằng 1 ngón TỰ TÍNH. CHỈ ở viền xanh.
+// Bỏ qua khi chạm UI chỉnh sửa hoặc khi đang nhúm.
 static void overlayHandleManualPan(UIEvent *event) {
     if (!gScaleLockModeEnabled || !gOverlayImageView || event.type != UIEventTypeTouches) {
         gManualPanActive = NO;
@@ -1655,11 +2007,18 @@ static void overlayHandleManualPan(UIEvent *event) {
     if (dx == 0 && dy == 0) {
         return;
     }
+    CGRect f = selectedElementFrame();
+    f.origin.x += dx;
+    f.origin.y += dy;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    gOverlayImageView.center = CGPointMake(gOverlayImageView.center.x + dx, gOverlayImageView.center.y + dy);
+    setSelectedElementFrame(f);
     [CATransaction commit];
-    syncOverlayStateRealtime(NO);
+    if (gSelectedIndex < 0) {
+        syncOverlayStateRealtime(NO);
+    } else {
+        saveHitboxes();
+    }
 }
 
 // Giữ-lâu 1 ngón TỰ TÍNH (không qua UILongPressGestureRecognizer - cũng hay không nhận
@@ -1703,8 +2062,10 @@ static void overlayHandleManualLongPress(UIEvent *event) {
 
     CGPoint p = [single locationInView:gOverlayRoot];
 
-    // Chế độ thường: chỉ nhận giữ-lâu khi ngón TRÊN ảnh (để vào viền xanh).
-    if (!gScaleLockModeEnabled && !touchInsideOverlayImage(single)) {
+    // Vào/THOÁT viền xanh đều bằng giữ-lâu TRÊN ẢNH (không phải hitbox/nền/đối tượng đang
+    // chọn). Khi đang ở viền xanh còn phải KHÔNG trùng hitbox để không lẫn với chọn hitbox.
+    BOOL onImage = touchInsideOverlayImage(single);
+    if (!onImage || (gScaleLockModeEnabled && hitboxIndexAtPoint(p) >= 0)) {
         gLongPressTracking = NO;
         gLongPressGeneration++;
         return;
@@ -1732,6 +2093,38 @@ static void overlayHandleManualLongPress(UIEvent *event) {
         gLongPressTracking = NO;
         gLongPressGeneration++;
     }
+}
+
+// Viền xanh: CHẠM XUỐNG (Began) để CHỌN phần tử. Trúng hitbox -> chọn hitbox đó; trúng
+// ảnh -> chọn ảnh; nền trống -> giữ nguyên lựa chọn (để kéo nền vẫn dời cái đang chọn).
+// Chạy TRƯỚC pan để cú kéo dời đúng phần tử vừa chọn.
+static void overlayHandleScaleLockSelect(UIEvent *event) {
+    if (!gScaleLockModeEnabled || !gOverlayImageView || event.type != UIEventTypeTouches) {
+        return;
+    }
+    NSUInteger activeCount = 0;
+    UITouch *began = nil;
+    for (UITouch *touch in event.allTouches) {
+        if (touch.phase == UITouchPhaseEnded || touch.phase == UITouchPhaseCancelled) {
+            continue;
+        }
+        activeCount++;
+        if (touch.phase == UITouchPhaseBegan) began = touch;
+    }
+    if (activeCount != 1 || !began || touchOnScaleLockControls(began)) {
+        return;
+    }
+    CGPoint p = [began locationInView:gOverlayRoot];
+    NSInteger idx = hitboxIndexAtPoint(p);
+    if (idx >= 0) {
+        gSelectedIndex = idx;
+    } else if (pointInsideOverlayImage(p)) {
+        gSelectedIndex = -1;
+    } else {
+        return;   // nền trống -> giữ nguyên
+    }
+    updateHitboxSelectionHighlight();
+    updateHitboxEditUIForSelection();
 }
 
 // Tap 1 ngón TỰ TÍNH (không qua recognizer), chế độ thường. GỘP 1 chỗ để panel & dim
@@ -1782,20 +2175,13 @@ static void overlayHandleManualTap(UIEvent *event) {
         return;
     }
 
-    // Nhấc hết tay. Tap hợp lệ (không kéo/giữ-lâu/nhúm) -> quyết định panel vs dim.
+    // Nhấc hết tay. Tap hợp lệ (không kéo/giữ-lâu/nhúm) -> trigger theo hitbox/ảnh.
     if (anyEnded && activeCount == 0) {
         BOOL validTap = gTapCandidate && !gLongPressConsumed && !gManualPinchActive;
-        BOOL onImage = gTapOnImage;
+        CGPoint tapPoint = gTapStart;
         gTapCandidate = NO;
-        if (!validTap) {
-            return;
-        }
-        if (onImage) {
-            overlayLog(@"SB tap TREN anh -> panel nap/rut");
-            showOverlayQuickActions();
-        } else if (gToggleClickEnabled) {
-            overlayLog(@"SB tap NGOAI anh -> dim");
-            scheduleToggleOverlayVisibility();
+        if (validTap) {
+            overlayTriggerAtPoint(tapPoint);
         }
     }
 }
@@ -1851,8 +2237,8 @@ static void registerOverlayNotification(void) {
             refreshOverlayWindowVisibility();
         });
 
-        // App thứ ba báo "có chạm" kèm toạ độ. SpringBoard biết vị trí ảnh nên tự quyết:
-        // trúng ảnh -> hiện panel nạp/rút (KHÔNG dim); ngoài ảnh -> toggle dim.
+        // App thứ ba báo "có chạm" kèm toạ độ. SpringBoard biết vị trí ảnh + hitbox nên tự
+        // quyết: trúng hitbox -> mờ/rõ theo loại; trúng ảnh -> panel nạp/rút; còn lại -> 0.
         notify_register_check(kOverlayAppTouchLocState, &gAppTouchLocToken);
         notify_register_dispatch(kOverlayAppTouchNotification, &gAppTouchToken, dispatch_get_main_queue(), ^(__unused int token) {
             uint64_t packed = 0;
@@ -1861,19 +2247,8 @@ static void registerOverlayNotification(void) {
             }
             CGPoint p = CGPointMake((double)(uint32_t)(packed >> 32),
                                     (double)(uint32_t)(packed & 0xFFFFFFFFu));
-            BOOL onImage = NO;
-            if (gOverlayImageView && gOverlayVisible && !gOverlayImageView.hidden && !gScaleLockModeEnabled) {
-                // Dung sai 28pt quanh ảnh -> bấm gần mép vẫn mở panel (ảnh có thể nhỏ).
-                CGRect zone = CGRectInset(gOverlayImageView.frame, -28.0, -28.0);
-                onImage = CGRectContainsPoint(zone, p) || pointInsideOverlayImage(p);
-            }
-            if (onImage) {
-                overlayLog(@"app-touch TRUNG anh (%.0f,%.0f) -> panel nap/rut", p.x, p.y);
-                showOverlayQuickActions();
-            } else {
-                overlayLog(@"app-touch NGOAI anh (%.0f,%.0f) -> dim", p.x, p.y);
-                scheduleToggleOverlayVisibility();
-            }
+            overlayLog(@"app-touch (%.0f,%.0f)", p.x, p.y);
+            overlayTriggerAtPoint(p);
         });
 
         // Công bố state ban đầu cho các app đọc.
@@ -2113,9 +2488,9 @@ static void scheduleActivationRetry(int attempt) {
         }
 
         %orig(event);
-        overlayHandleManualPinch(event);       // viền xanh: 2 ngón ở đâu cũng zoom
-        overlayHandleManualPan(event);         // viền xanh: 1 ngón ở đâu cũng di chuyển ảnh
-        overlayHandleManualLongPress(event);   // viền xanh: giữ-lâu 1 ngón -> thoát
+        overlayHandleScaleLockSelect(event);   // viền xanh: chạm để CHỌN ảnh/hitbox
+        overlayHandleManualPan(event);         // viền xanh: kéo 1 ngón -> dời phần tử đang chọn
+        overlayHandleManualLongPress(event);   // viền xanh: giữ-lâu TRÊN ẢNH -> thoát
         return;
     }
 
@@ -2127,10 +2502,8 @@ static void scheduleActivationRetry(int attempt) {
 
     handleHiddenImageDoubleTapIfNeeded(event);
 
-    // Chế độ thường: 2 ngón TRONG ảnh -> zoom; giữ-lâu 1 ngón trên ảnh -> vào viền xanh.
-    // overlayHandleManualTap lo CẢ tap-trên-ảnh (panel) lẫn tap-ngoài-ảnh (dim) - gộp 1
-    // chỗ nên không còn vòng lặp dim riêng (vốn dễ chạy xung đột với panel).
-    overlayHandleManualPinch(event);
+    // Chế độ thường: giữ-lâu 1 ngón trên ảnh -> vào viền xanh; tap trên ảnh -> panel.
+    // (Bỏ nhúm 2 ngón phóng to: ảnh chỉ chỉnh kích thước trong viền xanh bằng 2 thanh X/Y.)
     overlayHandleManualLongPress(event);
     overlayHandleManualTap(event);
 }
