@@ -119,7 +119,6 @@ static void appLog(NSString *format, ...) {
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIButton *showButton;
 @property (nonatomic, strong) UIButton *deleteButton;
-@property (nonatomic, strong) UISwitch *toggleClickSwitch;
 @property (nonatomic, strong) UISlider *hideDelaySlider;
 @property (nonatomic, strong) UISlider *showDelaySlider;
 @property (nonatomic, strong) UISlider *dimOpacitySlider;
@@ -248,17 +247,6 @@ static void appLog(NSString *format, ...) {
     settingsView.layer.cornerRadius = 8;
     [contentView addSubview:settingsView];
 
-    UILabel *toggleLabel = [UILabel new];
-    toggleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    toggleLabel.text = @"Toggle Click";
-    toggleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    [settingsView addSubview:toggleLabel];
-
-    self.toggleClickSwitch = [UISwitch new];
-    self.toggleClickSwitch.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.toggleClickSwitch addTarget:self action:@selector(settingsChanged) forControlEvents:UIControlEventValueChanged];
-    [settingsView addSubview:self.toggleClickSwitch];
-
     UILabel *hideDelayLabel = [UILabel new];
     hideDelayLabel.translatesAutoresizingMaskIntoConstraints = NO;
     hideDelayLabel.text = @"Delay an";
@@ -340,12 +328,7 @@ static void appLog(NSString *format, ...) {
         [settingsView.leadingAnchor constraintEqualToAnchor:self.previewImageView.leadingAnchor],
         [settingsView.trailingAnchor constraintEqualToAnchor:self.previewImageView.trailingAnchor],
 
-        [toggleLabel.topAnchor constraintEqualToAnchor:settingsView.topAnchor constant:14],
-        [toggleLabel.leadingAnchor constraintEqualToAnchor:settingsView.leadingAnchor constant:14],
-        [self.toggleClickSwitch.centerYAnchor constraintEqualToAnchor:toggleLabel.centerYAnchor],
-        [self.toggleClickSwitch.trailingAnchor constraintEqualToAnchor:settingsView.trailingAnchor constant:-14],
-
-        [hideDelayLabel.topAnchor constraintEqualToAnchor:toggleLabel.bottomAnchor constant:18],
+        [hideDelayLabel.topAnchor constraintEqualToAnchor:settingsView.topAnchor constant:14],
         [hideDelayLabel.leadingAnchor constraintEqualToAnchor:settingsView.leadingAnchor constant:14],
         [self.hideDelayValueLabel.centerYAnchor constraintEqualToAnchor:hideDelayLabel.centerYAnchor],
         [self.hideDelayValueLabel.trailingAnchor constraintEqualToAnchor:settingsView.trailingAnchor constant:-14],
@@ -401,7 +384,6 @@ static void appLog(NSString *format, ...) {
 
 - (void)loadSettings {
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kOverlaySettingsPath];
-    self.toggleClickSwitch.on = [settings[@"toggleClickEnabled"] boolValue];
     self.hideDelaySlider.value = settings[@"hideDelayMs"] ? [settings[@"hideDelayMs"] floatValue] : 0.0;
     self.showDelaySlider.value = settings[@"showDelayMs"] ? [settings[@"showDelayMs"] floatValue] : 0.0;
     self.dimOpacitySlider.value = settings[@"dimOpacity"] ? [settings[@"dimOpacity"] floatValue] : 1.0;
@@ -419,7 +401,7 @@ static void appLog(NSString *format, ...) {
 - (void)settingsChanged {
     [self updateSettingsLabels];
     NSDictionary *settings = @{
-        @"toggleClickEnabled": @(self.toggleClickSwitch.on),
+        @"toggleClickEnabled": @YES,   // bỏ công tắc: hitbox luôn hoạt động
         @"hideDelayMs": @((NSInteger)self.hideDelaySlider.value),
         @"showDelayMs": @((NSInteger)self.showDelaySlider.value),
         @"dimOpacity": @(self.dimOpacitySlider.value),
@@ -432,7 +414,6 @@ static void appLog(NSString *format, ...) {
 }
 
 - (void)resetSettingsForNewImage {
-    self.toggleClickSwitch.on = NO;
     self.hideDelaySlider.value = 0;
     self.showDelaySlider.value = 0;
     self.dimOpacitySlider.value = 1.0;

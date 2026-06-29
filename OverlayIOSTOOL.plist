@@ -4,9 +4,12 @@
 <dict>
 	<key>Filter</key>
 	<dict>
-		<key>Bundles</key>
+		<!-- Inject vào MỌI tiến trình UIKit: SpringBoard (render overlay) + tất cả app
+		     (relay toạ độ chạm để hitbox hoạt động ngay trong app). %ctor tự định tuyến:
+		     chỉ SpringBoard vẽ overlay; app thật chỉ chạy relay nhẹ; tiến trình khác thoát sớm. -->
+		<key>Classes</key>
 		<array>
-			<string>com.apple.springboard</string>
+			<string>UIApplication</string>
 		</array>
 	</dict>
 </dict>

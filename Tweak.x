@@ -1882,9 +1882,7 @@ static void overlayTriggerAtPoint(CGPoint p) {
     }
     NSInteger idx = hitboxIndexAtPoint(p);
     if (idx >= 0) {
-        if (!gToggleClickEnabled) {
-            return;
-        }
+        // KHÔNG phụ thuộc toggle-click nữa: trúng hitbox luôn mờ/rõ theo độ mờ đã set.
         NSInteger type = [gHitboxes[idx][@"type"] integerValue];
         scheduleSetOverlayDimmed(type == 1);   // 0=Hiện -> rõ(NO), 1=Mờ -> mờ(YES)
         return;
