@@ -2055,6 +2055,7 @@ static void applyScaleLockMode(BOOL enabled) {
         dismissOverlayQuickActions();
     }
 
+    BOOL wasEnabled = gScaleLockModeEnabled;   // để biết có PHẢI vừa thoát viền xanh không
     gScaleLockModeEnabled = enabled;
     gToggleGeneration++;
 
@@ -2088,9 +2089,14 @@ static void applyScaleLockMode(BOOL enabled) {
         updateHitboxEditUIForSelection();
         updateHitboxSelectionHighlight();
     } else {
-        // THOÁT viền xanh: ảnh đang FOCUS trở thành ảnh HIỆN (rõ), ảnh kia ẩn hẳn.
-        gActiveImageIndex = (gEditingImageIndex == 1 && hasSecondImage()) ? 1 : 0;
-        gOverlayDimmed = NO;
+        // CHỈ khi vừa THỰC SỰ thoát viền xanh (wasEnabled) mới đặt ảnh focus thành ảnh
+        // hiện (rõ). applyScaleLockMode(NO) còn bị gọi từ ĐỒNG BỘ STATE (mỗi lần đổi ảnh/
+        // mờ bằng hitbox) — KHÔNG được reset active/dim ở đó, nếu không lệnh hitbox vừa
+        // chạy sẽ bị HOÀN TÁC ngay (đúng triệu chứng "không mất, không mờ").
+        if (wasEnabled) {
+            gActiveImageIndex = (gEditingImageIndex == 1 && hasSecondImage()) ? 1 : 0;
+            gOverlayDimmed = NO;
+        }
         if (gOverlayImageView) {
             gOverlayImageView.layer.borderWidth = 0;
             gOverlayImageView.layer.borderColor = nil;
