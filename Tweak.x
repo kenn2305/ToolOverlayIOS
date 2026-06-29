@@ -1159,7 +1159,7 @@ static void hideImageFromPanelTapped(__unused UIButton *button) {
 
 static OverlayControlTarget *gOverlayControlTarget = nil;
 
-static void ensureScaleLockControls(void) {
+static void __attribute__((unused)) ensureScaleLockControls(void) {
     if (!gOverlayRoot || gScaleLockControlsPanel) {
         return;
     }
