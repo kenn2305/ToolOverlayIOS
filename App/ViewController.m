@@ -464,9 +464,41 @@ static void appLog(NSString *format, ...) {
     [self presentViewController:picker animated:YES completion:nil];
 }
 
+// Giảm kích thước + chuẩn hoá hướng/scale ảnh vừa chọn. Ảnh gốc từ camera (vd iPhone
+// XS Max 12MP ~48MB khi giải mã) tạo nhiều bản sao lớn -> app nhẹ bị OS kill ("văng ra").
+// Vẽ lại ở kích thước vừa phải (scale 1.0) vừa né hết tràn bộ nhớ vừa xoá EXIF orientation.
+- (UIImage *)normalizedImageForOverlay:(UIImage *)image {
+    if (!image || image.size.width <= 0 || image.size.height <= 0) {
+        return image;
+    }
+    @try {
+        CGFloat maxDim = 1500.0;
+        CGSize size = image.size;
+        CGFloat longest = MAX(size.width, size.height);
+        CGFloat ratio = (longest > maxDim) ? (maxDim / longest) : 1.0;
+        CGSize target = CGSizeMake(MAX(1.0, floor(size.width * ratio)),
+                                   MAX(1.0, floor(size.height * ratio)));
+
+        UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+        format.scale = 1.0;     // 1 pixel = 1 point -> kích thước đoán được, nhẹ
+        format.opaque = NO;
+        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:target format:format];
+        UIImage *result = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+            [image drawInRect:CGRectMake(0, 0, target.width, target.height)];
+        }];
+        return result ?: image;
+    } @catch (__unused NSException *exception) {
+        return image;   // có lỗi thì dùng ảnh gốc, KHÔNG để crash
+    }
+}
+
 - (void)setSelectedImageAndStatus:(UIImage *)image status:(NSString *)status {
     self.selectedImage = image;
-    self.selectedImageData = image ? [self pngDataForImage:image] : nil;
+    @try {
+        self.selectedImageData = image ? [self pngDataForImage:image] : nil;
+    } @catch (__unused NSException *exception) {
+        self.selectedImageData = nil;
+    }
     [self updateState];
     if (status.length) {
         self.statusLabel.text = status;
@@ -474,17 +506,21 @@ static void appLog(NSString *format, ...) {
 }
 
 - (NSData *)pngDataForImage:(UIImage *)image {
+    if (!image) {
+        return nil;
+    }
     NSData *pngData = UIImagePNGRepresentation(image);
     if (pngData.length) {
         return pngData;
     }
 
-    UIGraphicsBeginImageContextWithOptions(image.size, NO, image.scale);
-    [image drawInRect:(CGRect){CGPointZero, image.size}];
-    UIImage *renderedImage = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-
-    return UIImagePNGRepresentation(renderedImage);
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
+    format.scale = image.scale > 0 ? image.scale : 1.0;
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:image.size format:format];
+    return [renderer PNGDataWithActions:^(UIGraphicsImageRendererContext *context) {
+        [image drawInRect:(CGRect){CGPointZero, image.size}];
+    }];
 }
 
 - (BOOL)writeFallbackFileForImage:(UIImage *)image {
@@ -617,10 +653,12 @@ static void appLog(NSString *format, ...) {
 }
 
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<UIImagePickerControllerInfoKey,id> *)info {
-    UIImage *image = info[UIImagePickerControllerOriginalImage];
-    if (!image) {
-        image = info[UIImagePickerControllerEditedImage];
+    UIImage *raw = info[UIImagePickerControllerOriginalImage];
+    if (!raw) {
+        raw = info[UIImagePickerControllerEditedImage];
     }
+    // Chuẩn hoá/giảm cỡ NGAY (tránh tràn bộ nhớ -> văng) trước khi giữ tham chiếu ảnh gốc.
+    UIImage *image = [self normalizedImageForOverlay:raw];
 
     [picker dismissViewControllerAnimated:YES completion:^{
         if (image) {
