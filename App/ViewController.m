@@ -1,6 +1,7 @@
 #import "ViewController.h"
 #import <notify.h>
 #import <ImageIO/ImageIO.h>
+#import <PhotosUI/PhotosUI.h>
 
 static NSString * const kOverlayDirectory = @"/var/mobile/Library/OverlayIOSTOOL";
 static NSString * const kOverlayImagePath = @"/var/mobile/Library/OverlayIOSTOOL/overlay.png";
@@ -110,7 +111,7 @@ static void appLog(NSString *format, ...) {
 
 @end
 
-@interface ViewController () <UIImagePickerControllerDelegate, UINavigationControllerDelegate>
+@interface ViewController () <PHPickerViewControllerDelegate, UIImagePickerControllerDelegate, UINavigationControllerDelegate>
 @property (nonatomic, strong) UIImage *selectedImage;
 @property (nonatomic, strong) NSData *selectedImageData;
 @property (nonatomic, strong) UIImageView *previewImageView;
@@ -451,17 +452,58 @@ static void appLog(NSString *format, ...) {
 }
 
 - (void)chooseImageTapped {
-    if (![UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypePhotoLibrary]) {
+    // PHPicker (iOS 14+): chạy ngoài tiến trình, bàn giao ảnh qua NSItemProvider (nạp
+    // theo yêu cầu) -> bền hơn UIImagePickerController với app no-container/sandbox
+    // (vốn hay văng ngay khi chọn ảnh trên iOS 16). KHÔNG cần quyền thư viện ảnh.
+    @try {
+        PHPickerConfiguration *config = [[PHPickerConfiguration alloc] init];
+        config.selectionLimit = 1;
+        config.filter = [PHPickerFilter imagesFilter];
+        PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:config];
+        picker.delegate = self;
+        appLog(@"chooseImageTapped: mo PHPicker");
+        [self presentViewController:picker animated:YES completion:nil];
+    } @catch (NSException *exception) {
+        appLog(@"chooseImageTapped: PHPicker loi %@ - %@", exception.name, exception.reason);
         self.statusLabel.text = @"Khong mo duoc thu vien anh";
+    }
+}
+
+- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    appLog(@"PHPicker didFinishPicking: %lu ket qua", (unsigned long)results.count);
+    if (results.count == 0) {
         return;
     }
 
-    UIImagePickerController *picker = [UIImagePickerController new];
-    picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
-    picker.mediaTypes = @[@"public.image"];
-    picker.allowsEditing = NO;
-    picker.delegate = self;
-    [self presentViewController:picker animated:YES completion:nil];
+    NSItemProvider *provider = results.firstObject.itemProvider;
+    if (!provider) {
+        [self setSelectedImageAndStatus:nil status:@"Tai anh that bai"];
+        return;
+    }
+
+    self.statusLabel.text = @"Dang tai anh...";
+    __weak typeof(self) weakSelf = self;
+    // Nạp DỮ LIỆU thô (không để hệ thống tự giải mã UIImage) rồi tự giảm cỡ qua ImageIO.
+    [provider loadDataRepresentationForTypeIdentifier:@"public.image" completionHandler:^(NSData *data, NSError *error) {
+        UIImage *image = nil;
+        @try {
+            if (data.length) {
+                image = [weakSelf downsampledImageFromData:data maxPixel:1500.0];
+            }
+        } @catch (__unused NSException *exception) {
+            image = nil;
+        }
+        appLog(@"PHPicker loadData: bytes=%lu image=%d err=%@",
+               (unsigned long)data.length, image != nil, error.localizedDescription ?: @"-");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (image) {
+                [weakSelf setSelectedImageAndStatus:image status:nil];
+            } else {
+                [weakSelf setSelectedImageAndStatus:nil status:@"Tai anh that bai"];
+            }
+        });
+    }];
 }
 
 // Giảm cỡ ảnh bằng ImageIO ĐỌC THẲNG TỪ FILE -> KHÔNG bao giờ giải mã ảnh gốc đầy đủ
@@ -476,6 +518,38 @@ static void appLog(NSString *format, ...) {
     CGImageRef thumb = NULL;
     @try {
         source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+        if (!source) {
+            return nil;
+        }
+        NSDictionary *options = @{
+            (id)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+            (id)kCGImageSourceCreateThumbnailWithTransform: @YES,
+            (id)kCGImageSourceShouldCacheImmediately: @YES,
+            (id)kCGImageSourceThumbnailMaxPixelSize: @((int)maxPixel),
+        };
+        thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+        if (thumb) {
+            result = [UIImage imageWithCGImage:thumb scale:1.0 orientation:UIImageOrientationUp];
+        }
+    } @catch (__unused NSException *exception) {
+        result = nil;
+    }
+    if (thumb) { CGImageRelease(thumb); }
+    if (source) { CFRelease(source); }
+    return result;
+}
+
+// Giảm cỡ ảnh bằng ImageIO từ DỮ LIỆU thô (dùng cho PHPicker). Cũng không giải mã ảnh
+// gốc đầy đủ -> an toàn bộ nhớ cho ảnh độ phân giải cao.
+- (UIImage *)downsampledImageFromData:(NSData *)data maxPixel:(CGFloat)maxPixel {
+    if (!data.length) {
+        return nil;
+    }
+    UIImage *result = nil;
+    CGImageSourceRef source = NULL;
+    CGImageRef thumb = NULL;
+    @try {
+        source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
         if (!source) {
             return nil;
         }
