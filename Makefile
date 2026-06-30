@@ -13,7 +13,10 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = OverlayIOSTOOL
 OverlayIOSTOOL_FILES = Tweak.x
 OverlayIOSTOOL_ARCHS = arm64 arm64e
-OverlayIOSTOOL_CFLAGS = -fobjc-arc -O2
+# -I. : các module code nằm trong modules/ và được Tweak.x #import "modules/..." ->
+# thêm thư mục dự án vào include path để bộ biên dịch tìm thấy (file sinh ra từ Logos
+# nằm ở .theos/obj nên quote-include mặc định không thấy modules/).
+OverlayIOSTOOL_CFLAGS = -fobjc-arc -O2 -I.
 OverlayIOSTOOL_FRAMEWORKS = UIKit CoreGraphics QuartzCore
 
 include $(THEOS_MAKE_PATH)/tweak.mk
