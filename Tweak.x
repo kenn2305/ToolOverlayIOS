@@ -1082,7 +1082,10 @@ static void applyOverlayStateFromDisk(void) {
     }
 
     if (state[@"scaleLockModeEnabled"]) {
-        applyScaleLockMode([state[@"scaleLockModeEnabled"] boolValue]);
+        BOOL want = [state[@"scaleLockModeEnabled"] boolValue];
+        if (want != gScaleLockModeEnabled) {   // chỉ gọi khi THỰC SỰ đổi -> tránh tác dụng phụ
+            applyScaleLockMode(want);
+        }
     }
 
     applyOverlayAlpha();
@@ -2152,13 +2155,23 @@ static void __attribute__((unused)) scheduleSetOverlayDimmed(BOOL dimmed) {
 // về độ mờ dùng chung. TỨC THÌ, không animation.
 static void applyActiveImage(NSInteger index, BOOL dimmed) {
     if (gScaleLockModeEnabled || index < 0 || index > 1 || !imageViewAtIndex(index)) {
+        overlayLog(@"applyActiveImage BO QUA idx=%ld dimmed=%d scaleLock=%d hasView=%d",
+                   (long)index, dimmed, gScaleLockModeEnabled, imageViewAtIndex(index) != nil);
         return;
     }
     gActiveImageIndex = index;
     gOverlayDimmed = dimmed;
     applyActiveImageDisplay();
     refreshOverlayWindowVisibility();
-    persistOverlayState(YES);
+    // KHÔNG broadcast: không process nào khác nghe state-notification (app chỉ relay).
+    // Broadcast sẽ tự bắn lại -> applyOverlayStateFromDisk -> applyScaleLockMode(NO) ->
+    // hoàn tác đúng lệnh vừa chạy. Ghi đĩa (NO) là đủ để bền qua respring.
+    persistOverlayState(NO);
+    UIImageView *v1 = gOverlayImageView2;
+    overlayLog(@"applyActiveImage OK active=%ld dim=%d vis=%d | img0 hidden=%d alpha=%.2f | img1 %@",
+               (long)gActiveImageIndex, gOverlayDimmed, gOverlayVisible,
+               gOverlayImageView.hidden, gOverlayImageView.alpha,
+               v1 ? [NSString stringWithFormat:@"hidden=%d alpha=%.2f", v1.hidden, v1.alpha] : @"nil");
 }
 
 // Lên lịch HIỆN ảnh index sau delay (Hiện -> delay hiện, Mờ -> delay ẩn). Kích hoạt khi
