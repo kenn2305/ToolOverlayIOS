@@ -2194,6 +2194,23 @@ static void scheduleShowImage(NSInteger index, BOOL dimmed) {
     });
 }
 
+// Quy đổi PIXEL -> ĐIỂM. Trong SpringBoard, chạm XUYÊN QUA (vùng trống/hitbox ở màn hình
+// chính) bị trả về theo PIXEL (vượt khung điểm), trong khi ảnh/hitbox lưu theo ĐIỂM ->
+// phải quy về điểm nếu không sẽ dò trượt. Toạ độ đã là điểm (<= khung) thì giữ nguyên,
+// nên relay từ app (vốn gửi điểm) KHÔNG bị ảnh hưởng.
+static CGPoint overlayNormalizePoint(CGPoint p) {
+    if (!gOverlayRoot) {
+        return p;
+    }
+    CGSize b = gOverlayRoot.bounds.size;
+    CGFloat scale = UIScreen.mainScreen.scale;
+    if (scale > 1.0 && b.width > 0 && b.height > 0 && (p.x > b.width || p.y > b.height)) {
+        p.x /= scale;
+        p.y /= scale;
+    }
+    return p;
+}
+
 static BOOL pointInsideImageView(UIImageView *v, CGPoint pointInRoot) {
     if (!v || v.hidden || !gOverlayRoot) {
         return NO;
@@ -2229,6 +2246,7 @@ static void overlayTriggerAtPoint(CGPoint p) {
     if (gScaleLockModeEnabled || !gOverlayImageView) {
         return;
     }
+    p = overlayNormalizePoint(p);   // pixel (màn hình chính) -> điểm; relay (điểm) giữ nguyên
     NSInteger idx = hitboxIndexAtPoint(p);
     if (idx >= 0) {
         NSInteger type = [gHitboxes[idx][@"type"] integerValue];
@@ -2517,7 +2535,7 @@ static void overlayHandleManualTap(UIEvent *event) {
 
     if (activeTouch) {
         if (activeTouch.phase == UITouchPhaseBegan) {
-            CGPoint p = [activeTouch locationInView:gOverlayRoot];
+            CGPoint p = overlayNormalizePoint([activeTouch locationInView:gOverlayRoot]);
             gTapCandidate = YES;
             gTapStart = p;
             // Trên ảnh = trong frame ẢNH ĐANG HIỆN + dung sai 28pt (ảnh nhỏ dễ bấm trượt).
@@ -2528,7 +2546,7 @@ static void overlayHandleManualTap(UIEvent *event) {
             overlayLog(@"SB tap Began (%.0f,%.0f) onImage=%d frame=%@ toggle=%d",
                        p.x, p.y, gTapOnImage, NSStringFromCGRect(activeFrame), gToggleClickEnabled);
         } else if (gTapCandidate) {
-            CGPoint p = [activeTouch locationInView:gOverlayRoot];
+            CGPoint p = overlayNormalizePoint([activeTouch locationInView:gOverlayRoot]);
             CGFloat dx = p.x - gTapStart.x;
             CGFloat dy = p.y - gTapStart.y;
             if (dx * dx + dy * dy > 24.0 * 24.0) {
