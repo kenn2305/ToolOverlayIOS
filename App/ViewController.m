@@ -766,10 +766,15 @@ static void appLog(NSString *format, ...) {
 }
 
 - (void)deleteImageTapped {
+    // "Xoa anh" (ảnh 1) = XOÁ TẤT: cả ảnh 1, ảnh 2, hitbox, state. SpringBoard nhận
+    // kOverlayRemoveNotification -> clearPublishedStorage + removeOverlay (dọn sạch).
     [self clearPublishedImage];
+    [self clearPublishedImage2];
     [NSFileManager.defaultManager removeItemAtPath:kOverlayHitboxesPath error:nil];   // xoá ảnh -> xoá hitbox
     self.selectedImage = nil;
     self.selectedImageData = nil;
+    self.selectedImage2 = nil;
+    self.selectedImageData2 = nil;
     [self updateState];
     self.statusLabel.text = @"Da xoa overlay";
     notify_post(kOverlayRemoveNotification);

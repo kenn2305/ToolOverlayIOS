@@ -1,7 +1,7 @@
 Package: com.vietanh.overlayiostool
 Name: OverlayIOSTOOL
 Depends: mobilesubstrate, firmware (>= 14.0), firmware (<< 17.0)
-Version: 5.33.0
+Version: 5.34.0
 Architecture: iphoneos-arm64
 Description: Stable overlay for iOS 14-16 (rootless + rootful), A8 and newer devices.
 Maintainer: Viet Anh

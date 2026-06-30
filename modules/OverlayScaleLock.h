@@ -144,6 +144,38 @@ static void scheduleShowImage(NSInteger index, BOOL dimmed) {
     });
 }
 
+// ẨN/MỜ ảnh: hitbox MỜ của ảnh N chỉ MỜ ảnh N NẾU N đang là ảnh hiện. KHÔNG đổi ảnh
+// active, KHÔNG hiện/ẩn ảnh kia. (Tap hitbox ẩn của ảnh không-hiện -> không làm gì.)
+static void applyHideImage(NSInteger index) {
+    if (gScaleLockModeEnabled || index < 0 || index > 1 || !imageViewAtIndex(index)) {
+        return;
+    }
+    if (gActiveImageIndex != index) {
+        return;   // ảnh này không đang hiện -> không đụng tới ảnh kia
+    }
+    gOverlayDimmed = YES;
+    applyActiveImageDisplay();   // ảnh hiện tại -> alpha = độ mờ; ảnh kia GIỮ NGUYÊN (ẩn)
+    refreshOverlayWindowVisibility();
+    persistOverlayState(NO);
+    overlayLog(@"applyHideImage OK active=%ld dim=1", (long)gActiveImageIndex);
+}
+
+static void scheduleHideImage(NSInteger index) {
+    if (index < 0 || index > 1 || !imageViewAtIndex(index)) {
+        return;
+    }
+    if (gActiveImageIndex != index || gOverlayDimmed) {
+        return;   // không phải ảnh đang hiện, hoặc đã mờ rồi -> bỏ
+    }
+    NSUInteger generation = ++gToggleGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(gHideDelayMs * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+        if (generation != gToggleGeneration) {
+            return;
+        }
+        applyHideImage(index);
+    });
+}
+
 // Quy đổi PIXEL -> ĐIỂM. Trong SpringBoard, chạm XUYÊN QUA (vùng trống/hitbox ở màn hình
 // chính) bị trả về theo PIXEL (vượt khung điểm), trong khi ảnh/hitbox lưu theo ĐIỂM ->
 // phải quy về điểm nếu không sẽ dò trượt. Toạ độ đã là điểm (<= khung) thì giữ nguyên,

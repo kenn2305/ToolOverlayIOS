@@ -165,6 +165,8 @@ static void overlayAddHitbox(NSInteger type);
 static void overlayRemoveSelectedHitbox(void);
 static void setEditingImageIndex(NSInteger index);
 static void updateImageFocusButtons(void);
+static void overlayDeleteFocusedImageInEdit(void);
+static void overlayPromoteImage2ToImage1(void);
 
 @interface OverlayHitboxTarget : NSObject
 @end
@@ -173,7 +175,14 @@ static void updateImageFocusButtons(void);
 - (void)sizeYChanged:(UISlider *)s { hitboxResizeHeight(s.value); }
 - (void)addShow { overlayAddHitbox(0); }
 - (void)addDim { overlayAddHitbox(1); }
-- (void)removeSel { overlayRemoveSelectedHitbox(); }
+// Xoá: đang chọn HITBOX -> xoá hitbox đó; đang chọn ẢNH -> xoá ảnh focus + hitbox của nó.
+- (void)removeSel {
+    if (gSelectedIndex >= 0) {
+        overlayRemoveSelectedHitbox();
+    } else {
+        overlayDeleteFocusedImageInEdit();
+    }
+}
 - (void)doneEdit { applyScaleLockMode(NO); }
 - (void)focusImage1 { setEditingImageIndex(0); }
 - (void)focusImage2 { setEditingImageIndex(1); }
@@ -258,6 +267,85 @@ static void clearAllHitboxes(void) {
     if (gHitboxes) [gHitboxes removeAllObjects];
     gSelectedIndex = -1;
     [NSFileManager.defaultManager removeItemAtPath:kOverlayHitboxesPath error:nil];
+}
+
+// Đưa ẢNH 2 lên thay chỗ ẢNH 1: copy nội dung/khung, gỡ ảnh 1 cũ + hitbox img==0, đổi
+// hitbox img==1 -> img==0, và đồng bộ file (overlay2.png -> overlay.png) để bền qua respring.
+static void overlayPromoteImage2ToImage1(void) {
+    if (!gOverlayImageView || !gOverlayImageView2) return;
+    gOverlayImageView.image = gOverlayImageView2.image;
+    gOverlayImageView.transform = CGAffineTransformIdentity;
+    gOverlayImageView.frame = gOverlayImageView2.frame;
+    [gOverlayImageView2 removeFromSuperview];
+    gOverlayImageView2 = nil;
+
+    if (gHitboxes) {
+        for (NSInteger i = (NSInteger)gHitboxes.count - 1; i >= 0; i--) {
+            NSInteger im = [gHitboxes[i][@"img"] integerValue];
+            if (im == 0) {
+                [gHitboxes removeObjectAtIndex:i];      // bỏ hitbox của ảnh 1 cũ
+            } else {
+                gHitboxes[i][@"img"] = @(0);            // hitbox ảnh 2 -> thuộc ảnh 1
+            }
+        }
+        saveHitboxes();
+    }
+
+    @try {
+        NSFileManager *fm = NSFileManager.defaultManager;
+        if ([fm fileExistsAtPath:kOverlayImage2Path]) {
+            [fm removeItemAtPath:kOverlayImagePath error:nil];
+            [fm copyItemAtPath:kOverlayImage2Path toPath:kOverlayImagePath error:nil];
+            [fm removeItemAtPath:kOverlayImage2Path error:nil];
+        }
+    } @catch (__unused id e) {}
+    // Xoá pasteboard cũ -> respring sẽ đọc lại ảnh 1 từ overlay.png (đã là nội dung ảnh 2).
+    [UIPasteboard removePasteboardWithName:kOverlayPasteboardName];
+    [UIPasteboard removePasteboardWithName:kOverlayPasteboard2Name];
+
+    gActiveImageIndex = 0;
+    gEditingImageIndex = 0;
+}
+
+// VIỀN XANH - xoá ẢNH đang focus + hitbox của nó. Ảnh 2: gỡ thẳng, ở lại viền xanh.
+// Ảnh 1: nếu có ảnh 2 thì ảnh 2 thế chỗ; nếu là ảnh DUY NHẤT thì xoá sạch + thoát tool.
+static void overlayDeleteFocusedImageInEdit(void) {
+    if (!gScaleLockModeEnabled) return;
+
+    if (gEditingImageIndex == 1) {
+        if (gOverlayImageView2) { [gOverlayImageView2 removeFromSuperview]; gOverlayImageView2 = nil; }
+        if (gHitboxes) {
+            for (NSInteger i = (NSInteger)gHitboxes.count - 1; i >= 0; i--) {
+                if ([gHitboxes[i][@"img"] integerValue] == 1) [gHitboxes removeObjectAtIndex:i];
+            }
+            saveHitboxes();
+        }
+        [UIPasteboard removePasteboardWithName:kOverlayPasteboard2Name];
+        [NSFileManager.defaultManager removeItemAtPath:kOverlayImage2Path error:nil];
+        gEditingImageIndex = 0;
+        gActiveImageIndex = 0;
+    } else {
+        if (hasSecondImage()) {
+            overlayPromoteImage2ToImage1();
+        } else {
+            applyScaleLockMode(NO);     // ảnh duy nhất -> thoát viền xanh + xoá sạch
+            clearPublishedStorage();
+            removeOverlay();
+            return;
+        }
+    }
+
+    // Còn ảnh -> ở lại viền xanh, cập nhật hiển thị + UI.
+    gSelectedIndex = -1;
+    gImageFocusBar.hidden = !hasSecondImage();
+    updateImageFocusButtons();
+    rebuildHitboxViews();
+    updateHitboxSelectionHighlight();
+    updateHitboxEditUIForSelection();
+    applyActiveImageDisplay();
+    refreshOverlayWindowVisibility();
+    persistOverlayState(YES);
+    overlayLog(@"overlayDeleteFocusedImageInEdit xong: hasImg2=%d", hasSecondImage());
 }
 
 static UIButton *hitboxToolButton(NSString *title, UIColor *color, SEL action) {

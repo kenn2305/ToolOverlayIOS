@@ -27,8 +27,8 @@ static BOOL touchInsideOverlayImage(UITouch *touch) {
 }
 
 // CHẾ ĐỘ THƯỜNG - quyết định 1 cú chạm (toạ độ root), kích hoạt khi THẢ TAY:
-//  trúng hitbox Hiện của ảnh N -> HIỆN ảnh N (ảnh kia mất); trúng hitbox Mờ của ảnh N ->
-//  ảnh N MỜ về độ mờ; trúng ẢNH đang hiện -> panel nạp/rút; còn lại -> không gì.
+//  trúng hitbox HIỆN của ảnh N -> HIỆN ảnh N (ảnh kia ẩn hẳn); trúng hitbox MỜ của ảnh N
+//  -> CHỈ mờ ảnh N nếu N đang hiện (không đổi/hiện ảnh kia); trúng ẢNH đang hiện -> panel.
 static void overlayTriggerAtPoint(CGPoint p) {
     if (gScaleLockModeEnabled || !gOverlayImageView) {
         return;
@@ -41,7 +41,11 @@ static void overlayTriggerAtPoint(CGPoint p) {
         if (img == 1 && !hasSecondImage()) {
             return;   // hitbox thuộc ảnh 2 nhưng chưa có ảnh 2
         }
-        scheduleShowImage(img, type == 1);   // 0=Hiện -> rõ(NO), 1=Mờ -> mờ(YES)
+        if (type == 1) {
+            scheduleHideImage(img);     // MỜ: chỉ ẩn ảnh đang hiện, không đụng ảnh kia
+        } else {
+            scheduleShowImage(img, NO); // HIỆN: hiện ảnh N, ẩn hẳn ảnh kia
+        }
         return;
     }
     UIImageView *active = activeImageView();
