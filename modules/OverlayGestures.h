@@ -40,29 +40,30 @@ static void overlayTriggerAtPoint(CGPoint p) {
     // -> 1 lần bấm là xong, không còn no-op gây phải bấm 2-3 lần. Chỉ khi KHÔNG có "Hiện"
     // nào mới xét "Mờ" (ẩn ảnh đang hiện).
     NSInteger showImg = -1;   // ảnh cần HIỆN (ưu tiên cao nhất)
-    NSInteger hideImg = -1;   // ảnh cần MỜ (chỉ dùng khi không có Hiện)
+    BOOL hasHide = NO;        // có trúng hitbox MỜ (chỉ dùng khi không có Hiện)
     BOOL hitAny = NO;
     for (NSInteger i = (NSInteger)gHitboxes.count - 1; i >= 0; i--) {
         if (!CGRectContainsPoint(hitboxRectAt(i), p)) {
             continue;
         }
-        NSInteger img = hitboxImageAt(i);
-        if (img == 1 && !hasSecondImage()) {
-            continue;   // hitbox của ảnh 2 nhưng chưa có ảnh 2 -> bỏ qua
-        }
-        hitAny = YES;
-        if ([gHitboxes[i][@"type"] integerValue] == 0) {
-            if (showImg < 0) showImg = img;   // Hiện
-        } else {
-            if (hideImg < 0) hideImg = img;   // Mờ
+        if ([gHitboxes[i][@"type"] integerValue] == 0) {   // Hiện
+            NSInteger img = hitboxImageAt(i);
+            if (img == 1 && !hasSecondImage()) {
+                continue;   // hitbox HIỆN ảnh 2 nhưng chưa có ảnh 2 -> bỏ qua
+            }
+            hitAny = YES;
+            if (showImg < 0) showImg = img;
+        } else {                                           // Mờ
+            hitAny = YES;
+            hasHide = YES;
         }
     }
     if (showImg >= 0) {
         scheduleShowImage(showImg, NO);   // HIỆN: hiện ảnh N, ẩn hẳn ảnh kia
         return;
     }
-    if (hideImg >= 0) {
-        scheduleHideImage(hideImg);       // MỜ: chỉ ẩn ảnh đang hiện, không đụng ảnh kia
+    if (hasHide) {
+        scheduleHideImage();              // MỜ: ẩn ảnh ĐANG HIỆN (không đụng ảnh kia)
         return;
     }
     if (hitAny) {
