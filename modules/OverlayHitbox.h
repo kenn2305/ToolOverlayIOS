@@ -45,9 +45,9 @@ static CGRect hitboxRectAt(NSInteger index) {
     return CGRectMake([h[@"x"] doubleValue], [h[@"y"] doubleValue], [h[@"w"] doubleValue], [h[@"h"] doubleValue]);
 }
 
-// Hitbox trên cùng chứa điểm p (toạ độ root). -1 nếu không trúng. Chế độ thường: xét
-// hitbox của CẢ 2 ảnh (hitbox ảnh đang ẩn vẫn phải kích hoạt để hiện ảnh đó).
-static NSInteger hitboxIndexAtPoint(CGPoint p) {
+// Hitbox trên cùng chứa điểm p (toạ độ root). -1 nếu không trúng. (Giữ lại - trigger
+// giờ xét TẤT CẢ hitbox phủ điểm trong overlayTriggerAtPoint thay vì chỉ cái trên cùng.)
+static NSInteger __attribute__((unused)) hitboxIndexAtPoint(CGPoint p) {
     for (NSInteger i = (NSInteger)gHitboxes.count - 1; i >= 0; i--) {
         if (CGRectContainsPoint(hitboxRectAt(i), p)) return i;
     }

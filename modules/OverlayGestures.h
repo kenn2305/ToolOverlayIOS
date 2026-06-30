@@ -34,19 +34,39 @@ static void overlayTriggerAtPoint(CGPoint p) {
         return;
     }
     p = overlayNormalizePoint(p);   // pixel (màn hình chính) -> điểm; relay (điểm) giữ nguyên
-    NSInteger idx = hitboxIndexAtPoint(p);
-    if (idx >= 0) {
-        NSInteger type = [gHitboxes[idx][@"type"] integerValue];
-        NSInteger img = hitboxImageAt(idx);
+
+    // XÉT TẤT CẢ hitbox phủ lên điểm chạm (không chỉ cái trên cùng) -> ƯU TIÊN HIỆN.
+    // Nếu vùng chồng có cả "Hiện ảnh A" lẫn "Mờ ảnh B" thì HIỆN A thắng (A hiện, B tự ẩn)
+    // -> 1 lần bấm là xong, không còn no-op gây phải bấm 2-3 lần. Chỉ khi KHÔNG có "Hiện"
+    // nào mới xét "Mờ" (ẩn ảnh đang hiện).
+    NSInteger showImg = -1;   // ảnh cần HIỆN (ưu tiên cao nhất)
+    NSInteger hideImg = -1;   // ảnh cần MỜ (chỉ dùng khi không có Hiện)
+    BOOL hitAny = NO;
+    for (NSInteger i = (NSInteger)gHitboxes.count - 1; i >= 0; i--) {
+        if (!CGRectContainsPoint(hitboxRectAt(i), p)) {
+            continue;
+        }
+        NSInteger img = hitboxImageAt(i);
         if (img == 1 && !hasSecondImage()) {
-            return;   // hitbox thuộc ảnh 2 nhưng chưa có ảnh 2
+            continue;   // hitbox của ảnh 2 nhưng chưa có ảnh 2 -> bỏ qua
         }
-        if (type == 1) {
-            scheduleHideImage(img);     // MỜ: chỉ ẩn ảnh đang hiện, không đụng ảnh kia
+        hitAny = YES;
+        if ([gHitboxes[i][@"type"] integerValue] == 0) {
+            if (showImg < 0) showImg = img;   // Hiện
         } else {
-            scheduleShowImage(img, NO); // HIỆN: hiện ảnh N, ẩn hẳn ảnh kia
+            if (hideImg < 0) hideImg = img;   // Mờ
         }
+    }
+    if (showImg >= 0) {
+        scheduleShowImage(showImg, NO);   // HIỆN: hiện ảnh N, ẩn hẳn ảnh kia
         return;
+    }
+    if (hideImg >= 0) {
+        scheduleHideImage(hideImg);       // MỜ: chỉ ẩn ảnh đang hiện, không đụng ảnh kia
+        return;
+    }
+    if (hitAny) {
+        return;   // có trúng hitbox (nhưng đã xử lý) -> không mở panel
     }
     UIImageView *active = activeImageView();
     if (active) {
