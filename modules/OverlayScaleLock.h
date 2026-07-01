@@ -100,6 +100,18 @@ static void __attribute__((unused)) scheduleSetOverlayDimmed(BOOL dimmed) {
     });
 }
 
+// Đọc TƯƠI Delay ẩn/hiện từ settings.plist ngay trước khi lên lịch. Không phụ thuộc
+// notify (nếu notify tới trễ/lệch nhịp thì gShow/HideDelayMs có thể còn cũ = 0) -> luôn
+// dùng đúng giá trị người dùng vừa chỉnh trong app. File rất nhỏ nên đọc mỗi lần bấm OK.
+static void overlayRefreshDelaysFromDisk(void) {
+    NSDictionary *s = [NSDictionary dictionaryWithContentsOfFile:kOverlaySettingsPath];
+    if (![s isKindOfClass:NSDictionary.class]) {
+        return;
+    }
+    if (s[@"hideDelayMs"]) gHideDelayMs = MAX(0, MIN([s[@"hideDelayMs"] integerValue], 10000));
+    if (s[@"showDelayMs"]) gShowDelayMs = MAX(0, MIN([s[@"showDelayMs"] integerValue], 10000));
+}
+
 // ĐA-ẢNH: áp dụng (sau delay) việc HIỆN/MỜ 1 ảnh. Ảnh này thành ảnh đang hiện
 // (gActiveImageIndex) -> ảnh kia tự ẩn hẳn (loại trừ lẫn nhau). dimmed=YES: ảnh này mờ
 // về độ mờ dùng chung. TỨC THÌ, không animation.
@@ -133,6 +145,7 @@ static void scheduleShowImage(NSInteger index, BOOL dimmed) {
     if (gActiveImageIndex == index && gOverlayDimmed == dimmed && !imageViewAtIndex(index).hidden) {
         return;   // đang đúng trạng thái rồi -> khỏi làm
     }
+    overlayRefreshDelaysFromDisk();
     NSInteger delayMs = dimmed ? gHideDelayMs : gShowDelayMs;
     overlayLog(@"scheduleShowImage idx=%ld dimmed=%d delay=%ldms", (long)index, dimmed, (long)delayMs);
     NSUInteger generation = ++gToggleGeneration;
@@ -168,6 +181,8 @@ static void scheduleHideImage(void) {
     if (gOverlayDimmed) {
         return;   // đã mờ rồi -> khỏi làm
     }
+    overlayRefreshDelaysFromDisk();
+    overlayLog(@"scheduleHideImage delay=%ldms", (long)gHideDelayMs);
     NSUInteger generation = ++gToggleGeneration;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(gHideDelayMs * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
         if (generation != gToggleGeneration) {
