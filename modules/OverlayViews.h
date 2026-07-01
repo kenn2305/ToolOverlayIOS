@@ -17,10 +17,10 @@
         return hitView;
     }
 
-    // KHÔNG viền xanh: chỉ nhận chạm khi NGÓN nằm TRÊN ảnh ĐANG HIỆN (chỉ có 1 ảnh hiện
-    // tại 1 thời điểm). Chạm NGOÀI ảnh -> xuyên xuống app bên dưới (app vẫn bấm được, relay
-    // chạy). Ảnh đang ẩn không nhận chạm (để hitbox của nó relay xuống SpringBoard).
-    if (gOverlayVisible) {
+    // KHÔNG viền xanh: chỉ NHẬN chạm khi NGÓN nằm TRÊN ảnh ĐANG HIỆN RÕ (chưa mờ). Ảnh
+    // đang MỜ/ẩn (gOverlayDimmed) coi như KHÔNG có ở đó -> chạm xuyên xuống app + relay
+    // (để hitbox của ảnh khác kích hoạt). Chạm ngoài ảnh cũng xuyên xuống app.
+    if (gOverlayVisible && !gOverlayDimmed) {
         UIImageView *active = activeImageView();
         if (active && !active.hidden) {
             CGPoint imagePoint = [active convertPoint:point fromView:self];

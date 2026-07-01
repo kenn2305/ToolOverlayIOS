@@ -6,9 +6,10 @@ static BOOL pointInsideImageView(UIImageView *v, CGPoint pointInRoot) {
     return [v pointInside:point withEvent:nil];
 }
 
-// Chạm có trên ẢNH ĐANG HIỆN không (chế độ thường).
+// Chạm có trên ẢNH ĐANG HIỆN RÕ không (chế độ thường). Ảnh đang MỜ/ẩn -> coi như không
+// có -> mọi sự kiện (panel, giữ-lâu) ở vùng đó bị vô hiệu, chạm lọt xuống app.
 static BOOL pointInsideOverlayImage(CGPoint pointInRoot) {
-    if (!gOverlayVisible) {
+    if (!gOverlayVisible || gOverlayDimmed) {
         return NO;
     }
     return pointInsideImageView(activeImageView(), pointInRoot);
@@ -69,8 +70,9 @@ static void overlayTriggerAtPoint(CGPoint p) {
     if (hitAny) {
         return;   // có trúng hitbox (nhưng đã xử lý) -> không mở panel
     }
+    // Panel nạp/rút CHỈ mở khi ảnh đang HIỆN RÕ. Ảnh đang mờ/ẩn -> vùng đó vô hiệu.
     UIImageView *active = activeImageView();
-    if (active) {
+    if (active && gOverlayVisible && !gOverlayDimmed) {
         CGRect zone = CGRectInset(active.frame, -28.0, -28.0);
         if (pointInsideOverlayImage(p) || CGRectContainsPoint(zone, p)) {
             showOverlayQuickActions();
