@@ -132,10 +132,12 @@ static void appLog(NSString *format, ...) {
 @property (nonatomic, strong) UIButton *deleteButton2;
 @property (nonatomic, assign) NSInteger pickingSlot;   // 1 = ảnh 1, 2 = ảnh 2 (cho PHPicker)
 @property (nonatomic, strong) UISlider *hideDelaySlider;
+@property (nonatomic, strong) UISlider *hideDelaySlider2;   // Delay ẩn ảnh 2 (riêng)
 @property (nonatomic, strong) UISlider *showDelaySlider;
 @property (nonatomic, strong) UISlider *showDelaySlider2;   // Delay hiện ảnh 2 (riêng)
 @property (nonatomic, strong) UISlider *dimOpacitySlider;
 @property (nonatomic, strong) UILabel *hideDelayValueLabel;
+@property (nonatomic, strong) UILabel *hideDelay2ValueLabel;
 @property (nonatomic, strong) UILabel *showDelayValueLabel;
 @property (nonatomic, strong) UILabel *showDelay2ValueLabel;
 @property (nonatomic, strong) UILabel *dimOpacityValueLabel;
@@ -337,7 +339,7 @@ static void appLog(NSString *format, ...) {
 
     UILabel *hideDelayLabel = [UILabel new];
     hideDelayLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    hideDelayLabel.text = @"Delay an";
+    hideDelayLabel.text = @"Delay an A1";
     hideDelayLabel.font = [UIFont systemFontOfSize:14];
     [settingsView addSubview:hideDelayLabel];
 
@@ -353,6 +355,25 @@ static void appLog(NSString *format, ...) {
     self.hideDelaySlider.maximumValue = 2000;
     [self.hideDelaySlider addTarget:self action:@selector(settingsChanged) forControlEvents:UIControlEventValueChanged];
     [settingsView addSubview:self.hideDelaySlider];
+
+    UILabel *hideDelay2Label = [UILabel new];
+    hideDelay2Label.translatesAutoresizingMaskIntoConstraints = NO;
+    hideDelay2Label.text = @"Delay an A2";
+    hideDelay2Label.font = [UIFont systemFontOfSize:14];
+    [settingsView addSubview:hideDelay2Label];
+
+    self.hideDelay2ValueLabel = [UILabel new];
+    self.hideDelay2ValueLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.hideDelay2ValueLabel.textAlignment = NSTextAlignmentRight;
+    self.hideDelay2ValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightRegular];
+    [settingsView addSubview:self.hideDelay2ValueLabel];
+
+    self.hideDelaySlider2 = [UISlider new];
+    self.hideDelaySlider2.translatesAutoresizingMaskIntoConstraints = NO;
+    self.hideDelaySlider2.minimumValue = 0;
+    self.hideDelaySlider2.maximumValue = 2000;
+    [self.hideDelaySlider2 addTarget:self action:@selector(settingsChanged) forControlEvents:UIControlEventValueChanged];
+    [settingsView addSubview:self.hideDelaySlider2];
 
     UILabel *showDelayLabel = [UILabel new];
     showDelayLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -425,7 +446,16 @@ static void appLog(NSString *format, ...) {
         [self.hideDelaySlider.leadingAnchor constraintEqualToAnchor:settingsView.leadingAnchor constant:14],
         [self.hideDelaySlider.trailingAnchor constraintEqualToAnchor:settingsView.trailingAnchor constant:-14],
 
-        [showDelayLabel.topAnchor constraintEqualToAnchor:self.hideDelaySlider.bottomAnchor constant:14],
+        [hideDelay2Label.topAnchor constraintEqualToAnchor:self.hideDelaySlider.bottomAnchor constant:14],
+        [hideDelay2Label.leadingAnchor constraintEqualToAnchor:settingsView.leadingAnchor constant:14],
+        [self.hideDelay2ValueLabel.centerYAnchor constraintEqualToAnchor:hideDelay2Label.centerYAnchor],
+        [self.hideDelay2ValueLabel.trailingAnchor constraintEqualToAnchor:settingsView.trailingAnchor constant:-14],
+        [self.hideDelay2ValueLabel.widthAnchor constraintEqualToConstant:80],
+        [self.hideDelaySlider2.topAnchor constraintEqualToAnchor:hideDelay2Label.bottomAnchor constant:6],
+        [self.hideDelaySlider2.leadingAnchor constraintEqualToAnchor:settingsView.leadingAnchor constant:14],
+        [self.hideDelaySlider2.trailingAnchor constraintEqualToAnchor:settingsView.trailingAnchor constant:-14],
+
+        [showDelayLabel.topAnchor constraintEqualToAnchor:self.hideDelaySlider2.bottomAnchor constant:14],
         [showDelayLabel.leadingAnchor constraintEqualToAnchor:settingsView.leadingAnchor constant:14],
         [self.showDelayValueLabel.centerYAnchor constraintEqualToAnchor:showDelayLabel.centerYAnchor],
         [self.showDelayValueLabel.trailingAnchor constraintEqualToAnchor:settingsView.trailingAnchor constant:-14],
@@ -485,6 +515,7 @@ static void appLog(NSString *format, ...) {
 - (void)loadSettings {
     NSDictionary *settings = [NSDictionary dictionaryWithContentsOfFile:kOverlaySettingsPath];
     self.hideDelaySlider.value = settings[@"hideDelayMs"] ? [settings[@"hideDelayMs"] floatValue] : 0.0;
+    self.hideDelaySlider2.value = settings[@"hideDelayMs2"] ? [settings[@"hideDelayMs2"] floatValue] : self.hideDelaySlider.value;
     self.showDelaySlider.value = settings[@"showDelayMs"] ? [settings[@"showDelayMs"] floatValue] : 0.0;
     self.showDelaySlider2.value = settings[@"showDelayMs2"] ? [settings[@"showDelayMs2"] floatValue] : self.showDelaySlider.value;
     self.dimOpacitySlider.value = settings[@"dimOpacity"] ? [settings[@"dimOpacity"] floatValue] : 1.0;
@@ -493,6 +524,7 @@ static void appLog(NSString *format, ...) {
 
 - (void)updateSettingsLabels {
     self.hideDelayValueLabel.text = [NSString stringWithFormat:@"%ld ms", (long)self.hideDelaySlider.value];
+    self.hideDelay2ValueLabel.text = [NSString stringWithFormat:@"%ld ms", (long)self.hideDelaySlider2.value];
     self.showDelayValueLabel.text = [NSString stringWithFormat:@"%ld ms", (long)self.showDelaySlider.value];
     self.showDelay2ValueLabel.text = [NSString stringWithFormat:@"%ld ms", (long)self.showDelaySlider2.value];
     self.dimOpacityValueLabel.text = [NSString stringWithFormat:@"%.0f%%", self.dimOpacitySlider.value * 100.0];
@@ -503,6 +535,7 @@ static void appLog(NSString *format, ...) {
     NSDictionary *settings = @{
         @"toggleClickEnabled": @YES,   // bỏ công tắc: hitbox luôn hoạt động
         @"hideDelayMs": @((NSInteger)self.hideDelaySlider.value),
+        @"hideDelayMs2": @((NSInteger)self.hideDelaySlider2.value),
         @"showDelayMs": @((NSInteger)self.showDelaySlider.value),
         @"showDelayMs2": @((NSInteger)self.showDelaySlider2.value),
         @"dimOpacity": @(self.dimOpacitySlider.value),

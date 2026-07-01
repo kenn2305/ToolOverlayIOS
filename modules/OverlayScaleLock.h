@@ -110,7 +110,9 @@ static void overlayRefreshDelaysFromDisk(void) {
     }
     if (s[@"hideDelayMs"]) gHideDelayMs = MAX(0, MIN([s[@"hideDelayMs"] integerValue], 10000));
     if (s[@"showDelayMs"]) gShowDelayMs = MAX(0, MIN([s[@"showDelayMs"] integerValue], 10000));
-    // Delay hiện ảnh 2 riêng; nếu chưa có key thì theo delay hiện ảnh 1 (tương thích ngược).
+    // Delay ẩn/hiện ảnh 2 riêng; nếu chưa có key thì theo delay ảnh 1 (tương thích ngược).
+    if (s[@"hideDelayMs2"]) gHideDelayMs2 = MAX(0, MIN([s[@"hideDelayMs2"] integerValue], 10000));
+    else gHideDelayMs2 = gHideDelayMs;
     if (s[@"showDelayMs2"]) gShowDelayMs2 = MAX(0, MIN([s[@"showDelayMs2"] integerValue], 10000));
     else gShowDelayMs2 = gShowDelayMs;
 }
@@ -149,8 +151,9 @@ static void scheduleShowImage(NSInteger index, BOOL dimmed) {
         return;   // đang đúng trạng thái rồi -> khỏi làm
     }
     overlayRefreshDelaysFromDisk();
-    // HIỆN: ảnh 2 dùng delay riêng (gShowDelayMs2) để canh thời gian load tab khác nhau.
-    NSInteger delayMs = dimmed ? gHideDelayMs : (index == 1 ? gShowDelayMs2 : gShowDelayMs);
+    // Ảnh 2 dùng delay ẩn/hiện RIÊNG (gHide/ShowDelayMs2) để canh thời gian load tab khác nhau.
+    NSInteger delayMs = dimmed ? (index == 1 ? gHideDelayMs2 : gHideDelayMs)
+                               : (index == 1 ? gShowDelayMs2 : gShowDelayMs);
     overlayLog(@"scheduleShowImage idx=%ld dimmed=%d delay=%ldms", (long)index, dimmed, (long)delayMs);
     NSUInteger generation = ++gToggleGeneration;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayMs * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
@@ -186,9 +189,11 @@ static void scheduleHideImage(void) {
         return;   // đã mờ rồi -> khỏi làm
     }
     overlayRefreshDelaysFromDisk();
-    overlayLog(@"scheduleHideImage delay=%ldms", (long)gHideDelayMs);
+    // MỜ tác động lên ẢNH ĐANG HIỆN -> lấy delay ẩn theo ảnh đó (ảnh 2 có delay riêng).
+    NSInteger delayMs = (gActiveImageIndex == 1) ? gHideDelayMs2 : gHideDelayMs;
+    overlayLog(@"scheduleHideImage active=%ld delay=%ldms", (long)gActiveImageIndex, (long)delayMs);
     NSUInteger generation = ++gToggleGeneration;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(gHideDelayMs * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayMs * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
         if (generation != gToggleGeneration) {
             return;
         }
