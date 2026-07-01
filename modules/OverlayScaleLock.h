@@ -110,6 +110,9 @@ static void overlayRefreshDelaysFromDisk(void) {
     }
     if (s[@"hideDelayMs"]) gHideDelayMs = MAX(0, MIN([s[@"hideDelayMs"] integerValue], 10000));
     if (s[@"showDelayMs"]) gShowDelayMs = MAX(0, MIN([s[@"showDelayMs"] integerValue], 10000));
+    // Delay hiện ảnh 2 riêng; nếu chưa có key thì theo delay hiện ảnh 1 (tương thích ngược).
+    if (s[@"showDelayMs2"]) gShowDelayMs2 = MAX(0, MIN([s[@"showDelayMs2"] integerValue], 10000));
+    else gShowDelayMs2 = gShowDelayMs;
 }
 
 // ĐA-ẢNH: áp dụng (sau delay) việc HIỆN/MỜ 1 ảnh. Ảnh này thành ảnh đang hiện
@@ -146,7 +149,8 @@ static void scheduleShowImage(NSInteger index, BOOL dimmed) {
         return;   // đang đúng trạng thái rồi -> khỏi làm
     }
     overlayRefreshDelaysFromDisk();
-    NSInteger delayMs = dimmed ? gHideDelayMs : gShowDelayMs;
+    // HIỆN: ảnh 2 dùng delay riêng (gShowDelayMs2) để canh thời gian load tab khác nhau.
+    NSInteger delayMs = dimmed ? gHideDelayMs : (index == 1 ? gShowDelayMs2 : gShowDelayMs);
     overlayLog(@"scheduleShowImage idx=%ld dimmed=%d delay=%ldms", (long)index, dimmed, (long)delayMs);
     NSUInteger generation = ++gToggleGeneration;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayMs * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{

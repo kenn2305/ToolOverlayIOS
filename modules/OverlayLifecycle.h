@@ -90,10 +90,12 @@ static void loadOverlaySettings(void) {
     gToggleClickEnabled = [settings[@"toggleClickEnabled"] boolValue];
     gHideDelayMs = settings[@"hideDelayMs"] ? [settings[@"hideDelayMs"] integerValue] : 0;
     gShowDelayMs = settings[@"showDelayMs"] ? [settings[@"showDelayMs"] integerValue] : 0;
+    gShowDelayMs2 = settings[@"showDelayMs2"] ? [settings[@"showDelayMs2"] integerValue] : gShowDelayMs;
     gDimOpacity = settings[@"dimOpacity"] ? [settings[@"dimOpacity"] doubleValue] : 1.0;
     gDimAnimationMs = settings[@"dimAnimationMs"] ? [settings[@"dimAnimationMs"] integerValue] : 0;
     gHideDelayMs = MAX(0, MIN(gHideDelayMs, 10000));
     gShowDelayMs = MAX(0, MIN(gShowDelayMs, 10000));
+    gShowDelayMs2 = MAX(0, MIN(gShowDelayMs2, 10000));
     gDimAnimationMs = MAX(0, MIN(gDimAnimationMs, 10000));
     gDimOpacity = MAX(0.0, MIN(gDimOpacity, 1.0));
     if (!gToggleClickEnabled) {
