@@ -110,7 +110,7 @@ static void showOverlayQuickActions(void) {
     [rootView addSubview:gQuickActionsBackdrop];
 
     CGFloat cancelY = bounds.size.height - safeBottom - cancelHeight;
-    gQuickActionsCancelButton = quickActionsButton(@"Hủy", @selector(handleQuickActionsCancelButton:));
+    gQuickActionsCancelButton = quickActionsButton(@"Cancel", @selector(handleQuickActionsCancelButton:));
     gQuickActionsCancelButton.frame = CGRectMake(margin, cancelY, panelWidth, cancelHeight);
     gQuickActionsCancelButton.layer.cornerRadius = 13.0;
     gQuickActionsCancelButton.layer.masksToBounds = YES;
@@ -123,11 +123,11 @@ static void showOverlayQuickActions(void) {
     gQuickActionsPanel.layer.masksToBounds = YES;
     [rootView addSubview:gQuickActionsPanel];
 
-    UILabel *titleLabel = quickActionsLabel(@"Số dư", 18.0, kOverlayFontWeightSemibold);
+    UILabel *titleLabel = quickActionsLabel(@"Balance", 18.0, kOverlayFontWeightSemibold);
     titleLabel.frame = CGRectMake(16.0, 17.0, panelWidth - 32.0, 26.0);
     [gQuickActionsPanel addSubview:titleLabel];
 
-    UILabel *messageLabel = quickActionsLabel(@"Nhanh chóng di chuyển đến trang nạp/rút tiền trên trang web của broker",
+    UILabel *messageLabel = quickActionsLabel(@"Quickly navigate to account deposit/withdrawal pages on your broker's website",
                                                15.0,
                                                kOverlayFontWeightRegular);
     messageLabel.textColor = [UIColor colorWithWhite:0.76 alpha:1.0];
@@ -138,7 +138,7 @@ static void showOverlayQuickActions(void) {
     separator1.backgroundColor = [UIColor colorWithWhite:0.35 alpha:0.7];
     [gQuickActionsPanel addSubview:separator1];
 
-    UIButton *depositButton = quickActionsButton(@"Tiền nạp", @selector(handleQuickActionsDepositButton:));
+    UIButton *depositButton = quickActionsButton(@"Deposit", @selector(handleQuickActionsDepositButton:));
     depositButton.frame = CGRectMake(0.0, 112.5, panelWidth, 80.5);
     [gQuickActionsPanel addSubview:depositButton];
 
@@ -146,7 +146,7 @@ static void showOverlayQuickActions(void) {
     separator2.backgroundColor = [UIColor colorWithWhite:0.35 alpha:0.7];
     [gQuickActionsPanel addSubview:separator2];
 
-    UIButton *withdrawButton = quickActionsButton(@"Tiền rút", @selector(handleQuickActionsWithdrawButton:));
+    UIButton *withdrawButton = quickActionsButton(@"Withdrawal", @selector(handleQuickActionsWithdrawButton:));
     withdrawButton.frame = CGRectMake(0.0, 193.5, panelWidth, panelHeight - 193.5);
     [gQuickActionsPanel addSubview:withdrawButton];
 
@@ -289,4 +289,3 @@ static void ensureOverlayRoot(void) {
         gOverlayRoot = nil;
     }
 }
-
